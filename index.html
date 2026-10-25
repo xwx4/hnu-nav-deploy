@@ -7,6 +7,52 @@
     <meta name="theme-color" media="(prefers-color-scheme: light)" content="#eef2f8">
     <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#0f172a">
     <title>立体导航（单文件版）</title>
+<!-- 管理员密码门：每次进入 ?admin=1 都强制重新验证（不清除同页内已验证状态） -->
+<script id="admin-reauth-onload">
+/* fire-mode:reauth —— 每次进 ?admin=1 都要验证；未设密码时必须先走"出厂令牌"弹窗 */
+(function () {
+    try {
+        var isAdmin = /[?&]admin=1(&|$)/.test(window.location.search || '');
+        if (!isAdmin) return;
+        var ss = window.sessionStorage;
+        if (!ss) return;
+
+        // 登录/令牌弹窗刚验证通过：放行这一次，并补上会话标记，避免模块再问一遍
+        var just = 0;
+        try { just = parseInt(ss.getItem('fireAdminJustVerified') || '0', 10) || 0; } catch (e) {}
+        var fresh = just && (Date.now() - just) < 15000;
+        // 无 WebCrypto 的降级环境：弹窗无法本地哈希，回退到模块自带密码门完成设置
+        var legacy = false;
+        try { legacy = ss.getItem('fireAdminLegacySetup') === '1'; ss.removeItem('fireAdminLegacySetup'); } catch (e) {}
+
+        // 还没设置过管理员密码：只有"弹窗里验过出厂令牌"的这一次才允许进入，
+        // 手输 ?admin=1 一律退回普通页，避免绕过令牌直接设置密码。
+        var hasPass = false;
+        try { hasPass = !!window.localStorage.getItem('floorLockAdminPass'); } catch (e) {}
+        if (!hasPass && !fresh && !legacy) {
+            try {
+                var url = new URL(window.location.href);
+                url.searchParams.delete('admin');
+                window.location.replace(url.toString());
+            } catch (e2) { window.location.href = window.location.pathname; }
+            return;
+        }
+
+        if (fresh) {
+            try { ss.removeItem('fireAdminJustVerified'); } catch (e) {}
+            try { ss.setItem('floorLockAdminSess', 'ok'); } catch (e) {}
+            return;
+        }
+
+        // 常规进入：清掉旧会话标记，强制管理员密码门重新验证
+        ss.removeItem('floorLockAdminSess');
+        for (var i = ss.length - 1; i >= 0; i--) {
+            var k = ss.key(i);
+            if (k && /^floorLockAdmin/i.test(k)) ss.removeItem(k);
+        }
+    } catch (e) { /* 隐私模式下忽略 */ }
+})();
+</script>
     <!-- 楼层密码模块样式（带 id 后 JS 兜底 CSS 不再重复注入） -->
     
 <style id="floor-lock-styles">
@@ -568,8 +614,14 @@
             padding-top: calc(12px + 60px); background: var(--bg-secondary);
             border-bottom: 1px solid var(--border);
         }
-        .indoor-bld-name { font-size: 16px; font-weight: 600; }
-        .floor-tabs { display: flex; gap: 6px; overflow-x: auto; }
+        .indoor-bld-name {
+            font-size: 16px; font-weight: 600; flex: 0 0 auto;
+            max-width: 38%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+        }
+        .floor-tabs { display: flex; gap: 6px; overflow-x: auto; flex: 1 1 auto; min-width: 0; scrollbar-width: none; }
+        .floor-tabs::-webkit-scrollbar { display: none; }
+        /* 楼内视图里管理员入口会压住楼层标签，统一隐藏（回校园首页再进） */
+        body.indoor #admin-hint { display: none; }
         .floor-tab {
             padding: 6px 14px; border-radius: 20px; font-size: 14px;
             background: var(--bg-tertiary); color: var(--text-secondary);
@@ -732,6 +784,34 @@
             background: var(--bg-tertiary); border: 1px solid var(--border);
             color: var(--text-primary); font-size: 14px; min-height: 44px;
         }
+        /* 起点/终点搜索列：搜索框在上、原下拉保留在下 */
+        .ep-col { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 6px; position: relative; }
+        .ep-col select { width: 100%; }
+        .srch-wrap { position: relative; }
+        .room-srch {
+            width: 100%; box-sizing: border-box; padding: 7px 10px; min-height: 34px;
+            border-radius: var(--radius-sm); background: var(--bg-tertiary);
+            border: 1px solid var(--border); color: var(--text-primary); font-size: 13px;
+        }
+        .room-srch:focus { outline: 2px solid var(--primary); outline-offset: 0; }
+        /* 结果列表向上弹出（控件在底栏，向下会被遮） */
+        .srch-list {
+            position: absolute; left: 0; right: 0; bottom: calc(100% + 4px); z-index: 70;
+            background: var(--bg-secondary); border: 1px solid var(--border); border-radius: 10px;
+            box-shadow: 0 -8px 24px rgba(0,0,0,.28); max-height: 230px; overflow-y: auto;
+            -webkit-overflow-scrolling: touch; display: none;
+        }
+        .srch-list.show { display: block; }
+        .srch-item {
+            display: flex; align-items: center; justify-content: space-between; gap: 8px;
+            padding: 10px 12px; font-size: 13px; color: var(--text-primary); cursor: pointer;
+            border-bottom: 1px solid var(--border); min-height: 40px; box-sizing: border-box;
+        }
+        .srch-item:last-child { border-bottom: none; }
+        .srch-item:active { background: var(--bg-tertiary); }
+        .srch-item .nm { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .srch-item .fl { flex: 0 0 auto; font-size: 11px; color: var(--text-tertiary); }
+        .srch-empty { padding: 10px 12px; font-size: 12px; color: var(--text-tertiary); }
         .arrow { color: var(--text-tertiary); font-size: 18px; }
         /* 路线面板：浮在地图下缘的半屏 Sheet，自身滚动，不挤压地图高度 */
         .route-info {
@@ -1234,6 +1314,58 @@ body.no-motion .layer-base.plan-loading::after { animation: none; }
 .trk-btns .trk-cl { background: transparent; color: var(--danger); border: 1px solid var(--border); }
 .trk-btns .trk-x { background: var(--bg-tertiary); color: var(--text-primary); border: 1px solid var(--border); }
 
+/* ===== 楼梯/电梯点按选层：一次性浮层，平面上不常驻任何新按钮 ===== */
+.floor-jump {
+    position: fixed; inset: 0; z-index: 9998; display: flex;
+    align-items: flex-end; justify-content: center;
+    background: rgba(15,23,42,.30);
+    padding: 0 12px calc(12px + env(safe-area-inset-bottom, 0px));
+}
+.floor-jump .fj-card {
+    width: 100%; max-width: 420px; background: var(--bg-secondary);
+    border: 1px solid var(--border); border-radius: 16px;
+    padding: 14px 16px 12px; box-shadow: 0 18px 44px rgba(15,23,42,.35);
+}
+.floor-jump .fj-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 10px; }
+.floor-jump .fj-head b { font-size: 15px; color: var(--text-primary); }
+.floor-jump .fj-close {
+    width: 32px; height: 32px; border-radius: 50%; border: none; cursor: pointer;
+    background: var(--bg-tertiary); color: var(--text-secondary); font-size: 14px;
+}
+.floor-jump .fj-chips { display: flex; flex-wrap: wrap; gap: 8px; }
+.floor-jump .fj-chip {
+    min-width: 54px; min-height: 40px; padding: 0 12px; border-radius: 10px;
+    border: 1px solid var(--border); background: var(--bg-tertiary);
+    color: var(--text-primary); font-size: 14px; font-weight: 600; cursor: pointer;
+}
+.floor-jump .fj-chip.on { background: var(--primary); border-color: var(--primary); color: #fff; opacity: .8; cursor: default; }
+.floor-jump .fj-note { margin-top: 10px; font-size: 12px; line-height: 1.55; color: var(--text-tertiary); }
+/* 跨层导航提示条 */
+.rt-cross {
+    margin: 2px 0 8px; padding: 8px 10px; border-radius: 8px;
+    background: rgba(37,99,235,.12); border: 1px solid rgba(37,99,235,.35);
+    color: var(--text-primary); font-size: 12.5px; line-height: 1.55;
+}
+/* 跨层确认主 CTA：确认「已到达本层终点(楼梯/电梯口)」后自动切层续航 */
+.rt-jump-main {
+    margin: 2px 0 10px; padding: 13px 12px; font-size: 15px; font-weight: 700;
+    background: linear-gradient(135deg, #f59e0b, #fbbf24); color: #3a2503;
+    box-shadow: 0 6px 18px rgba(245,158,11,.35);
+    animation: rtJumpPulse 1.8s ease-in-out infinite;
+}
+@keyframes rtJumpPulse {
+    0%, 100% { box-shadow: 0 6px 18px rgba(245,158,11,.3); }
+    50% { box-shadow: 0 6px 26px rgba(245,158,11,.6); }
+}
+@media (prefers-reduced-motion: reduce) { .rt-jump-main { animation: none; } }
+/* 矢量平面图锐利渲染，缩放后墙线与房间号不发虚 */
+.floor-svg { shape-rendering: geometricPrecision; text-rendering: geometricPrecision; }
+/* 墙线在原图里只有 2 单位宽，缩到手机屏幕后过淡；只加粗深蓝墙体，家具灰线保持细 */
+.floor-svg path[stroke="#1a3a6b"], .floor-svg rect[stroke="#1a3a6b"],
+.floor-svg polygon[stroke="#1a3a6b"], .floor-svg line[stroke="#1a3a6b"] {
+    stroke-width: 3.4px;
+}
+
 </style>
 
 
@@ -1315,24 +1447,31 @@ body.no-motion .layer-base.plan-loading::after { animation: none; }
                     <button type="button" class="ml-btn" id="mapLockedUnlock">输入密码解锁</button>
                 </div>
             </div>
-            <div class="view-btns">
-                <button type="button" id="rotateLeft" title="向左旋转" aria-label="向左旋转">↺</button>
-                <button type="button" id="rotateRight" title="向右旋转" aria-label="向右旋转">↻</button>
-                <button type="button" id="rotateReset" title="回正" aria-label="旋转回正">⟳ 回正</button>
-                <button type="button" id="fxBtn" title="动效开关" aria-label="动效开关">✦ 动效</button>
-            </div>
+            <!-- 视图控件只保留三个：缩放 +/− 与一键复位（旋转用双指手势，回正并入复位） -->
             <div class="zoom-btns">
                 <button type="button" id="zoomIn" title="放大" aria-label="放大">+</button>
                 <button type="button" id="zoomOut" title="缩小" aria-label="缩小">−</button>
-                <button type="button" id="zoomReset" title="重置" aria-label="重置视图">⌂</button>
+                <button type="button" id="zoomReset" title="复位视图" aria-label="复位视图">⌂</button>
             </div>
             <canvas id="miniMap" class="mini-map" width="240" height="170" aria-hidden="true"></canvas>
         </div>
         <div class="arrival-banner" id="arrivalBanner"></div>
         <div class="indoor-controls">
-            <select id="startSelect" aria-label="选择起点位置"><option value="">-- 起点 --</option></select>
+            <div class="ep-col">
+                <div class="srch-wrap">
+                    <input type="search" id="startSearch" class="room-srch" placeholder="🔍 搜起点房间" autocomplete="off" aria-label="搜索起点房间">
+                    <div class="srch-list" id="startSearchList" role="listbox" aria-label="起点搜索结果"></div>
+                </div>
+                <select id="startSelect" aria-label="选择起点位置"><option value="">-- 起点 --</option></select>
+            </div>
             <span class="arrow" aria-hidden="true">→</span>
-            <select id="destSelect" aria-label="选择终点位置"><option value="">-- 终点 --</option></select>
+            <div class="ep-col">
+                <div class="srch-wrap">
+                    <input type="search" id="destSearch" class="room-srch" placeholder="🔍 搜终点房间" autocomplete="off" aria-label="搜索终点房间">
+                    <div class="srch-list" id="destSearchList" role="listbox" aria-label="终点搜索结果"></div>
+                </div>
+                <select id="destSelect" aria-label="选择终点位置"><option value="">-- 终点 --</option></select>
+            </div>
             <button type="button" id="routePeek" class="route-peek">🧭 路线面板</button>
             <div class="route-info" id="routeInfo"></div>
         </div>
@@ -3897,10 +4036,11 @@ var IndoorRouter = (function () {
                     marker.dataset.room = roomName;
                     marker.style.left = (pt.x / REF_W * 100) + "%";
                     marker.style.top = (pt.y / REF_H * 100) + "%";
-                    marker.title = "终点：" + roomName;
+                    var isVertical = /^(楼梯|电梯)/.test(roomName);
+                    marker.title = isVertical ? "点按选择楼层：" + roomName : "终点：" + roomName;
                     marker.tabIndex = 0;
                     marker.setAttribute("role", "button");
-                    marker.setAttribute("aria-label", "设为终点：" + roomName);
+                    marker.setAttribute("aria-label", isVertical ? ("选择楼层：" + roomName) : ("设为终点：" + roomName));
                     /* S2.4：SVG 图钉（选中/起点时显示）+ 小圆点（常态） */
                     marker.innerHTML =
                         '<svg class="rm-pin" viewBox="0 0 24 26" aria-hidden="true">' +
@@ -3910,8 +4050,12 @@ var IndoorRouter = (function () {
                     var label = document.createElement("span");
                     label.textContent = roomName;
                     marker.appendChild(label);
-                    /* S3.2：点标记弹出房间信息卡 Sheet（设为起点/终点/关闭） */
-                    function openCard() { openRoomSheet(roomName); }
+                    /* S3.2：点标记弹出房间信息卡 Sheet（设为起点/终点/关闭）
+                     * 楼梯/电梯不是目的地，点按改为「选层」这一个轻量交互 */
+                    function openCard() {
+                        if (isVertical) { openFloorJump(roomName); return; }
+                        openRoomSheet(roomName);
+                    }
                     marker.addEventListener("click", openCard);
                     marker.addEventListener("keydown", function (ev) {
                         if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); openCard(); }
@@ -3944,7 +4088,7 @@ var IndoorRouter = (function () {
         function updateStartDropdown() {
             var select = document.getElementById("startSelect");
             var currentData = floorCoordinates[currentFloor] || {};
-            var html = '<option value="">-- 请选择起点位置 --</option>';
+            var html = '<option value="">-- 选择起点 --</option>';
             for (var key in currentData) {
                 html += '<option value="' + key + '">起点：' + key + '</option>';
             }
@@ -3964,11 +4108,14 @@ var IndoorRouter = (function () {
             // 1F 默认门厅，其余楼层默认电梯厅，省一步
             if (currentData["门厅"]) select.value = "门厅";
             else if (currentData["电梯厅"]) select.value = "电梯厅";
+            // 切层/换楼后下拉已重建，清空两个搜索框避免残留旧楼层文本
+            var _s1 = document.getElementById("startSearch"), _s2 = document.getElementById("destSearch");
+            if (_s1) _s1.value = ""; if (_s2) _s2.value = "";
         }
         function updateDestDropdown() {
             var select = document.getElementById("destSelect");
             var currentData = floorCoordinates[currentFloor] || {};
-            var html = '<option value="">-- 请选择你要去的目的地 --</option>';
+            var html = '<option value="">-- 选择终点 --</option>';
             for (var key in currentData) {
                 if (key === "门厅") continue;        // 门厅只当起点
                 html += '<option value="' + key + '">终点：' + key + '</option>';
@@ -3987,6 +4134,82 @@ var IndoorRouter = (function () {
             html += '</optgroup>';
             select.innerHTML = html;
         }
+        /* ---------------------------------------------------------------
+         * 起点/终点房间搜索：输入即筛「当前楼栋全部楼层」的房间
+         * （floorCoordinates 已被 PlanBuildings 按楼栋切换数据域，天然覆盖研究生楼），
+         * 点选结果 → 写入对应下拉（跨层自动 f层:房间 编码）→ 触发 startNavigation。
+         * 原下拉选项完整保留，搜索只是更快的入口。
+         * ------------------------------------------------------------- */
+        function roomIndex() {
+            var out = [];
+            for (var fl in floorCoordinates) {
+                for (var k in floorCoordinates[fl]) out.push({ name: k, floor: String(fl) });
+            }
+            return out;
+        }
+        function bindRoomSearch(inputId, listId, selectId) {
+            var inp = document.getElementById(inputId);
+            var list = document.getElementById(listId);
+            var sel = document.getElementById(selectId);
+            if (!inp || !list || !sel) return;
+            function hide() { list.classList.remove("show"); list.innerHTML = ""; }
+            function pick(item) {
+                if (!item) return;
+                /* 本层房间用纯名字，跨层用 f层:房间 编码（与下拉 option value 对齐） */
+                sel.value = (item.floor === String(currentFloor)) ? item.name : ("f" + item.floor + ":" + item.name);
+                inp.value = item.name + "（" + item.floor + " 层）";
+                hide();
+                startNavigation();
+            }
+            function renderList() {
+                var q = inp.value.trim().toLowerCase();
+                if (!q) { hide(); return; }
+                var ms = roomIndex().filter(function (r) { return r.name.toLowerCase().indexOf(q) >= 0; });
+                ms.sort(function (a, b) {
+                    var ac = (a.floor === String(currentFloor)) ? 0 : 1, bc = (b.floor === String(currentFloor)) ? 0 : 1;
+                    if (ac !== bc) return ac - bc;                                   // 本层优先
+                    var ap = a.name.toLowerCase().indexOf(q) === 0 ? 0 : 1;
+                    var bp = b.name.toLowerCase().indexOf(q) === 0 ? 0 : 1;
+                    if (ap !== bp) return ap - bp;                                   // 前缀命中优先
+                    if (a.floor !== b.floor) return Number(a.floor) - Number(b.floor);
+                    return a.name.localeCompare(b.name, "zh");
+                });
+                ms = ms.slice(0, 30);
+                if (!ms.length) {
+                    list.innerHTML = '<div class="srch-empty">没有匹配的房间，换个关键词试试</div>';
+                    list.classList.add("show");
+                    return;
+                }
+                list.innerHTML = "";
+                ms.forEach(function (r) {
+                    var it = document.createElement("div");
+                    it.className = "srch-item";
+                    it.setAttribute("role", "option");
+                    it._item = r;
+                    var nm = document.createElement("span");
+                    nm.className = "nm"; nm.textContent = r.name;
+                    var fl2 = document.createElement("span");
+                    fl2.className = "fl";
+                    fl2.textContent = (r.floor === String(currentFloor)) ? "本层" : (r.floor + " 层");
+                    it.appendChild(nm); it.appendChild(fl2);
+                    /* pointerdown 抢在 blur 前触发，保证点选不被输入框失焦吃掉 */
+                    it.addEventListener("pointerdown", function (e) { e.preventDefault(); pick(r); });
+                    list.appendChild(it);
+                });
+                list.classList.add("show");
+            }
+            inp.addEventListener("input", renderList);
+            inp.addEventListener("focus", renderList);
+            inp.addEventListener("keydown", function (e) {
+                if (e.key === "Enter") {
+                    var first = list.querySelector(".srch-item");
+                    if (list.classList.contains("show") && first) { e.preventDefault(); pick(first._item); }
+                } else if (e.key === "Escape") { hide(); inp.blur(); }
+            });
+            inp.addEventListener("blur", function () { setTimeout(hide, 140); });
+        }
+        bindRoomSearch("startSearch", "startSearchList", "startSelect");
+        bindRoomSearch("destSearch", "destSearchList", "destSelect");
         /* ---------------------------------------------------------------
          * 这个楼层是否真的画得出来（受密码控制）
          * ------------------------------------------------------------- */
@@ -4063,6 +4286,7 @@ var IndoorRouter = (function () {
                     svgEl.style.opacity = "0";
                     layer.appendChild(svgEl);
                     layer.classList.remove("plan-loading");   // SVG 同步注入，立即可见
+                    scheduleMini();   // 刷新小地图缩略图（SVG 需转图后绘制）
                     requestAnimationFrame(function() {
                         requestAnimationFrame(function() {
                             /* 注意：行内 opacity:0 优先级高于 .fade-in 类，必须显式清除，
@@ -4136,9 +4360,17 @@ var IndoorRouter = (function () {
                     var ss = document.getElementById("startSelect");
                     var sel = document.getElementById("destSelect");
                     if (sel) sel.value = pa.dest;
-                    if (ss && pa.start) {
-                        if ((floorCoordinates[currentFloor] || {})[pa.start]) ss.value = pa.start;
-                        else if (floorCoordinates["1"] && floorCoordinates["1"][pa.start]) ss.value = "f1:" + pa.start;
+                    if (ss) {
+                        var fdata = floorCoordinates[currentFloor] || {};
+                        if (pa.start && fdata[pa.start]) ss.value = pa.start;
+                        else if (floorCoordinates["1"] && !ss.value && floorCoordinates["1"][pa.start]) ss.value = "f1:" + pa.start;
+                        /* 该层没有门厅/电梯厅默认值时，退而选楼梯/电梯，保证续航有起点 */
+                        if (!ss.value) {
+                            var cands = ["楼梯1", "楼梯2", "电梯", "电梯厅", "门厅"];
+                            for (var ci = 0; ci < cands.length; ci++) {
+                                if (fdata[cands[ci]]) { ss.value = cands[ci]; break; }
+                            }
+                        }
                     }
                     // S4.5 定位场景：仅高亮+居中，不自动开始导航（用户点击"导航"按钮才触发）
                     if (pa.locate) {
@@ -4870,6 +5102,32 @@ var IndoorRouter = (function () {
                 (uniRoute ? "🧭 统一导航 · 第 " + (uniRoute.idx + 1) + "/" + uniRoute.legs.length + " 段 · " : "🚶 全程 ") +
                 (alt.meters >= 100 ? Math.round(alt.meters) : alt.meters.toFixed(1)) + ' 米 · 约 ' +
                 (alt.sec >= 90 ? Math.round(alt.sec / 60) + ' 分钟' : Math.round(alt.sec) + ' 秒') + '</div>';
+            /* 跨层：先明确指引到楼梯/电梯，再说明下到几层（对应"5F 去 3F 先找楼梯"） */
+            var destFloor = (!uniRoute && currentRoute) ? floorOfNode(currentRoute.dest) : null;
+            var vtSeg = null;
+            if (destFloor && destFloor !== currentFloor) {
+                for (var vi = 0; vi < alt.segments.length; vi++) {
+                    var vg = alt.segments[vi];
+                    if ((vg.kind === "stairs" || vg.kind === "elevator") &&
+                        String(vg.floor) === String(currentFloor)) { vtSeg = vg; break; }
+                }
+            }
+            var vtName = vtSeg ? (vtSeg.node || (vtSeg.kind === "stairs" ? "楼梯" : "电梯")) : null;
+            var crossHtml = "";
+            if (vtSeg) {
+                crossHtml = '<div class="rt-cross">跨层导航：先到『' + vtName + '』，' +
+                    (vtSeg.kind === "stairs" ? "走楼梯" : "乘电梯") +
+                    (Number(vtSeg.toFloor) > Number(currentFloor) ? "上" : "下") +
+                    "至 " + vtSeg.toFloor + " 层，再继续前往目的地</div>";
+            }
+            /* 跨层主 CTA：走完本层段到楼梯/电梯口后，点它确认→自动切到目标层并续航。
+             * 放在横幅正下方（不埋在步骤列表尾部），一眼可见 */
+            var jumpHtml = "";
+            if (!uniRoute && destFloor && destFloor !== currentFloor) {
+                var jName = vtName || "楼梯/电梯口";
+                jumpHtml = '<button type="button" class="rt-jump rt-jump-main" data-jumpfloor="' + destFloor + '">' +
+                    '✅ 我已到达『' + jName + '』，前往 ' + destFloor + ' 层继续 ›</button>';
+            }
             /* S2.3 口播式"下一步"引导卡：当前层第一步（不在本层则取全程第一步），点击语音播报 */
             var nextStep = null;
             for (var si = 0; si < alt.steps.length; si++) {
@@ -4896,14 +5154,12 @@ var IndoorRouter = (function () {
                     stepsHtml += '<button type="button" class="rt-jump uni-exit" data-uni-exit="1">' +
                         '🚪 我已到门厅，继续室外导航 ›</button>';
                 }
-            } else {
-                var destFloor = floorOfNode(currentRoute.dest);
-                if (destFloor && destFloor !== currentFloor) {
-                    stepsHtml += '<button type="button" class="rt-jump" data-jumpfloor="' + destFloor +
-                        '">已到电梯？前往 ' + destFloor + ' 层继续 ›</button>';
-                }
+            } else if (destFloor && destFloor !== currentFloor) {
+                var jumpName = vtName || "电梯";
+                stepsHtml += '<button type="button" class="rt-jump" data-jumpfloor="' + destFloor +
+                    '">已到『' + jumpName + '』？前往 ' + destFloor + ' 层继续 ›</button>';
             }
-            showRouteInfo((uniRoute ? uniLegStripHTML() : "") + chips + head + nextHtml + stepsHtml);
+            showRouteInfo((uniRoute ? uniLegStripHTML() : "") + chips + head + crossHtml + jumpHtml + nextHtml + stepsHtml);
             bindRouteUI();
         }
 
@@ -4945,12 +5201,87 @@ var IndoorRouter = (function () {
             if (ux) ux.addEventListener("click", function () { uniAdvance(false); });
         }
 
+        /* 跨楼层接续：带上"将在目标层哪个楼梯/电梯出"作为续航起点 */
+        function crossCarry() {
+            if (!currentRoute) return null;
+            var carry = { dest: currentRoute.dest };
+            var alt0 = lastAlts && (lastAlts[currentScheme] || lastAlts[0]);
+            if (alt0 && alt0.segments) {
+                for (var i = 0; i < alt0.segments.length; i++) {
+                    var sg = alt0.segments[i];
+                    if ((sg.kind === "stairs" || sg.kind === "elevator") &&
+                        String(sg.floor) === String(currentFloor)) {
+                        carry.start = sg.nextName || null;
+                        break;
+                    }
+                }
+            }
+            return carry;
+        }
+
         /* 跨楼层接续：切到目标层（走楼层锁流程），解锁后自动以电梯厅续航 */
         function jumpToFloor(floor) {
             if (String(floor) === String(currentFloor)) return;
-            pendingAutoRoute = { dest: currentRoute ? currentRoute.dest : null };
+            pendingAutoRoute = crossCarry();
             if (floorLockCtl && floorLockCtl.unlockFloor) floorLockCtl.unlockFloor(floor + "F", "route");
             else applyUnlockedFloor(floor + "F");
+        }
+
+        /* 楼梯/电梯点按选层：只弹一个轻量楼层浮层，平面上不常驻任何新按钮。
+         * 若当前已有跨层路线，切层后会以目标房间自动续航。 */
+        function openFloorJump(nodeName) {
+            var old = document.getElementById("floorJumpSheet");
+            if (old) old.remove();
+            var n = (currentIndoorBld && currentIndoorBld.floors) || 5;
+            if (typeof PlanBuildings !== "undefined" && PlanBuildings.active()) {
+                n = PlanBuildings.floorsOf(PlanBuildings.currentId()) || n;
+            }
+            var isElev = /^电梯/.test(nodeName);
+            var chips = "";
+            for (var i = 1; i <= n; i++) {
+                var on = String(i) === String(currentFloor);
+                chips += '<button type="button" class="fj-chip' + (on ? ' on' : '') + '" data-fl="' + i + '"' +
+                         (on ? ' disabled' : '') + '>' + i + 'F</button>';
+            }
+            var wrap = document.createElement("div");
+            wrap.id = "floorJumpSheet";
+            wrap.className = "floor-jump";
+            wrap.innerHTML =
+                '<div class="fj-card">' +
+                  '<div class="fj-head"><b>' + nodeName + ' · 选择楼层</b>' +
+                    '<button type="button" class="fj-close" aria-label="关闭">✕</button></div>' +
+                  '<div class="fj-chips">' + chips + '</div>' +
+                  '<div class="fj-note">' +
+                    (isElev ? '乘电梯前往对应楼层；火灾等紧急情况请改走疏散楼梯。'
+                            : '沿楼梯前往对应楼层，切换后自动显示该层平面图。') +
+                  '</div>' +
+                '</div>';
+            document.body.appendChild(wrap);
+            function close() { wrap.remove(); }
+            wrap.querySelector(".fj-close").onclick = close;
+            wrap.addEventListener("click", function (e) { if (e.target === wrap) close(); });
+            wrap.querySelectorAll(".fj-chip").forEach(function (b) {
+                b.onclick = function () {
+                    var f = b.getAttribute("data-fl");
+                    close();
+                    switchIndoorFloor(f, "stair");
+                };
+            });
+        }
+        /* 楼梯/电梯选层后的统一切层入口（保留未完成的跨层路线） */
+        function switchIndoorFloor(f, src) {
+            var fS = String(f);
+            if (fS === String(currentFloor)) return;
+            var keep = (currentRoute && lastAlts && !lastAlts.error &&
+                        String(floorOfNode(currentRoute.dest)) === fS);
+            if (keep) pendingAutoRoute = crossCarry();
+            if (typeof PlanBuildings !== "undefined" && PlanBuildings.active()) {
+                PlanBuildings.prepareFloor(fS);
+                applyUnlockedFloor(fS + "F");
+                return;
+            }
+            if (floorLockCtl && floorLockCtl.unlockFloor) floorLockCtl.unlockFloor(fS + "F", src || "stair");
+            else applyUnlockedFloor(fS + "F");
         }
 
         /* ---------------- 画布渲染（纯几何：缩放/切方案只重绘，不重算 A*） ----------------
@@ -5620,7 +5951,7 @@ var navMode = "walk";
             var zoomReset = document.getElementById("zoomReset");
             if (zoomIn) zoomIn.onclick = function () { zoomAt(boxCenter(), 1.3); commit(true); };
             if (zoomOut) zoomOut.onclick = function () { zoomAt(boxCenter(), 1 / 1.3); commit(true); };
-            if (zoomReset) zoomReset.onclick = resetZoom;
+            if (zoomReset) zoomReset.onclick = function () { mapState.rotZ = 0; resetZoom(); };
             var rotateLeft = document.getElementById("rotateLeft");
             var rotateRight = document.getElementById("rotateRight");
             var rotateReset = document.getElementById("rotateReset");
@@ -5668,6 +5999,28 @@ var navMode = "walk";
             if (mini.raf) return;
             mini.raf = requestAnimationFrame(function () { mini.raf = 0; drawMini(); });
         }
+        /* SVG 平面图（研究生楼）没有 <img> 可画：把当层 SVG 转成缩略图并缓存，
+         * 否则小地图只能画空白网格，看起来像坏图 */
+        var miniSvgCache = { key: "", img: null };
+        function miniPlanImage() {
+            var img = document.getElementById("floorMap");
+            if (img && img.style.display !== "none" && img.naturalWidth > 1) return img;
+            var active = (typeof PlanBuildings !== "undefined" && PlanBuildings.active());
+            var key = active ? PlanBuildings.assetKey(currentFloor) : (currentFloor + "F");
+            if (miniSvgCache.key === key) return miniSvgCache.img;
+            miniSvgCache.key = key; miniSvgCache.img = null;
+            var svg = active ? PlanBuildings.svgFor(currentFloor)
+                             : (window.__FLOOR_SVG && window.__FLOOR_SVG[key]);
+            if (!svg) return null;
+            var im = new Image();
+            im.onload = function () {
+                if (miniSvgCache.key !== key) return;
+                miniSvgCache.img = im;
+                scheduleMini();
+            };
+            im.src = "data:image/svg+xml;charset=utf-8," + encodeURIComponent(svg);
+            return null;
+        }
         function drawMini() {
             var mm = document.getElementById("miniMap");
             var vp = document.getElementById("mapBox");
@@ -5677,13 +6030,14 @@ var navMode = "walk";
             ctx.clearRect(0, 0, W, H);
             ctx.fillStyle = "#eef2f8";
             ctx.fillRect(0, 0, W, H);
-            var img = document.getElementById("floorMap");
-            if (img && img.style.display !== "none" && img.naturalWidth > 1) {
-                var s = Math.min(W / img.naturalWidth, H / img.naturalHeight);
-                var dw = img.naturalWidth * s, dh = img.naturalHeight * s;
-                try { ctx.drawImage(img, (W - dw) / 2, (H - dh) / 2, dw, dh); } catch (e) {}
+            var src = miniPlanImage();
+            if (src && src.naturalWidth > 1) {
+                var pad = 5;
+                var s = Math.min((W - pad * 2) / src.naturalWidth, (H - pad * 2) / src.naturalHeight);
+                var dw = src.naturalWidth * s, dh = src.naturalHeight * s;
+                try { ctx.drawImage(src, (W - dw) / 2, (H - dh) / 2, dw, dh); } catch (e) {}
             } else {
-                // SVG 底图 / 加载中：画浅色图纸底 + 网格
+                // 尚未就绪：画浅色图纸底 + 网格（加载完成后 onload 会自动重绘）
                 ctx.strokeStyle = "rgba(100,116,139,.22)";
                 ctx.lineWidth = 1;
                 for (var gx = 10; gx < W; gx += 16) { ctx.beginPath(); ctx.moveTo(gx, 0); ctx.lineTo(gx, H); ctx.stroke(); }
@@ -7295,6 +7649,51 @@ var currentIndoorBld = null;   // 当前进入楼内导航的楼栋（BUILDINGS 
                 fmtDist(haversine(myPos, b)) + "）</b>，<b>不是可通行路径，请勿沿线行走</b>；请点『用高德App导航』获取真实路线。";
         }
         var embeddedTracking = false;   // S5.3：本轮内嵌室外规划是否入埋点账（统一导航的室外段不入账）
+        /* ============ 步行备选方案：途经物理与微电子科学学院 ============
+         * 高德 JS API 的 Walking 不支持 waypoints（只有 Driving 支持），
+         * 所以「必须经过某点」只能拆成两段规划再拼接：起点→物电院、物电院→目的地。
+         * 借鉴 index(4)：途经方案失败时回退「起点微调」，保证始终有第二条可选。 */
+        var VIA_POINT = { name: "物理与微电子科学学院", short: "物电院", lng: 112.94512, lat: 28.170214 };
+        var OFFSET_METERS = 25;   // 途经方案失败时的兜底：起点微调距离（米）
+        /* 米制偏移：经纬度 += 米 / 每度对应米数（纬度每度约 111320 米） */
+        function offsetLngLat(lng, lat, dx, dy) {
+            var mlng = 111320 * Math.cos(lat * Math.PI / 180), mlat = 111320;
+            return [lng + dx / mlng, lat + dy / mlat];
+        }
+        /* 两段路线拼接：衔接处重复点去重，距离/耗时累加，steps 顺接 */
+        function mergeRoutes(a, b) {
+            if (!a || !b) return null;
+            var raw = (a.path || []).concat(b.path || []), path = [];
+            for (var i = 0; i < raw.length; i++) {
+                var p = raw[i];
+                if (!p) continue;
+                var last = path[path.length - 1];
+                if (last && haversine(last, p) < 1) continue;   // 衔接点去重
+                path.push(p);
+            }
+            if (path.length < 2) return null;
+            return {
+                path: path,
+                dist: (a.dist || 0) + (b.dist || 0),
+                time: (a.time || 0) + (b.time || 0),
+                steps: (a.steps || []).concat(b.steps || []),
+                note: "", label: "", _line: null
+            };
+        }
+        /* 途经点规划：起点/终点本就在物电院 40m 内则无需绕行，返回 null */
+        function planViaRoute(originArr, destArr, searchFn, cb) {
+            var via = [VIA_POINT.lng, VIA_POINT.lat];
+            var o = { lng: originArr[0], lat: originArr[1] };
+            var d = { lng: destArr[0], lat: destArr[1] };
+            if (haversine(o, VIA_POINT) < 40 || haversine(d, VIA_POINT) < 40) { cb(null); return; }
+            searchFn(originArr, via, function (r1) {
+                if (!r1 || !r1.length) { cb(null); return; }
+                searchFn(via, destArr, function (r2) {
+                    if (!r2 || !r2.length) { cb(null); return; }
+                    cb(mergeRoutes(r1[0], r2[0]));
+                });
+            });
+        }
         function computeEmbeddedRoute(b) {
             if (!myPos || b.lng == null || b.lat == null) return;
             /* S5.1 断网守卫：离线时内嵌路线规划直接给明确提示 */
@@ -7419,6 +7818,50 @@ var currentIndoorBld = null;   // 当前进入楼内导航的楼栋（BUILDINGS 
                         }
                     }
                     if (!routes.length) { routeFail(b, origin, dest, why); return; }
+                    /* 步行：高德默认只给 1 条，补一条「途经物理与微电子科学学院」的备选；
+                     * 途经方案失败时回退「起点微调」，保证始终有第二条可选。 */
+                    if (navMode === "walk" && routes.length < 2) {
+                        var finishWalk = function (merged) {
+                            if (tk !== routeToken) return;
+                            for (var m = 0; m < merged.length; m++) {
+                                if (!merged[m].label) merged[m].label = "方案" + (m + 1);
+                            }
+                            annotateRoutes(merged);
+                            if (!drawRoutes(merged)) { routeFail(b, origin, dest, why); return; }
+                            startGeoWatch();
+                        };
+                        var searchSeg = function (sPt, ePt, cbSeg) {
+                            svc.search(sPt, ePt, function (st, rs) {
+                                if (tk !== routeToken) return;
+                                cbSeg((st === "complete") ? collectRoutes(rs) : []);
+                            });
+                        };
+                        planViaRoute(origin, dest, searchSeg, function (viaRoute) {
+                            if (tk !== routeToken) return;
+                            var out = routes.slice(0, 1);
+                            if (viaRoute) {
+                                viaRoute.label = "经" + VIA_POINT.short;
+                                viaRoute.note = "途经" + VIA_POINT.name;
+                                viaRoute._via = true;   // 标记：供高峰提示等逻辑识别
+                                out.push(viaRoute);
+                                finishWalk(out);
+                                return;
+                            }
+                            var offOrigin = offsetLngLat(origin[0], origin[1], OFFSET_METERS, -OFFSET_METERS);
+                            searchSeg(offOrigin, dest, function (alt) {
+                                if (tk !== routeToken) return;
+                                if (alt.length && Math.abs((alt[0].dist || 0) - (out[0].dist || 0)) > 10) {
+                                    alt[0].label = "备选方案";
+                                    alt[0].note = "起点微调 " + OFFSET_METERS + " 米得到的备选走法";
+                                    out.push(alt[0]);
+                                } else {
+                                    showToast("校园内主路唯一，仅规划到一条步行路线");
+                                }
+                                finishWalk(out);
+                            });
+                        });
+                        return;
+                    }
                     for (var i2 = 0; i2 < routes.length; i2++) routes[i2].label = routes.length > 1 ? ("方案" + (i2 + 1)) : modeLabel(navMode);
                     annotateRoutes(routes);
                     if (!drawRoutes(routes)) { routeFail(b, origin, dest, why); return; }
@@ -7998,7 +8441,7 @@ var currentIndoorBld = null;   // 当前进入楼内导航的楼栋（BUILDINGS 
             var box = document.createElement("div");
             box.style.cssText = "background:#fff;border-radius:12px;padding:20px;width:100%;max-width:420px;color:#0f172a;";
             box.innerHTML =
-                '<h3 style="margin:0 0 12px;font-size:17px;color:#0f172a;">设置高德 JS API Key</h3>' +
+                '<h3 style="margin:0 0 12px;font-size:17px;color:#0f172a;">设置</h3>' +
                 '<p style="margin:0 0 12px;font-size:13px;color:#334155;line-height:1.6;">' +
                 '填入后可在页面内显示高德地图并<b>点楼直接进入立体导航</b>。' +
                 '去 <a href="https://lbs.amap.com/" target="_blank" style="color:#1d4ed8;">高德开放平台</a> 申请「Web 端(JS API)」Key。</p>' +
@@ -8006,7 +8449,13 @@ var currentIndoorBld = null;   // 当前进入楼内导航的楼栋（BUILDINGS 
                 '<input id="amapKeyInput" style="width:100%;box-sizing:border-box;padding:10px;margin:6px 0 12px;border:1px solid #cfd9e5;border-radius:8px;font-size:14px;color:#0f172a;">' +
                 '<label style="font-size:13px;color:#334155;">安全密钥（可选，部分服务需要）</label>' +
                 '<input id="amapSecInput" style="width:100%;box-sizing:border-box;padding:10px;margin:6px 0 16px;border:1px solid #cfd9e5;border-radius:8px;font-size:14px;color:#0f172a;">' +
-                '<div style="display:flex;gap:10px;">' +
+                '<div style="display:flex;align-items:center;justify-content:space-between;gap:12px;' +
+                'padding:12px 0 4px;border-top:1px solid #e8eef6;">' +
+                '<div><div style="font-size:14px;color:#0f172a;">界面动效</div>' +
+                '<div style="font-size:12px;color:#64748b;margin-top:2px;">关闭后地图更省电、更流畅</div></div>' +
+                '<button id="fxToggleBtn" type="button" style="min-width:78px;padding:8px 14px;border-radius:999px;' +
+                'border:1px solid #cfd9e5;background:#eef1f5;color:#0f172a;font-size:13px;cursor:pointer;">开启</button></div>' +
+                '<div style="display:flex;gap:10px;margin-top:12px;">' +
                 '<button id="keySaveBtn" style="flex:1;padding:11px;background:var(--primary);color:#fff;border:none;border-radius:8px;font-size:15px;">保存并加载地图</button>' +
                 '<button id="keyCancelBtn" style="padding:11px 18px;background:#eef1f5;color:#334155;border:none;border-radius:8px;font-size:15px;">取消</button>' +
                 '</div>';
@@ -8015,6 +8464,15 @@ var currentIndoorBld = null;   // 当前进入楼内导航的楼栋（BUILDINGS 
             document.getElementById("amapKeyInput").value = getAmapKey();
             document.getElementById("amapSecInput").value = getAmapSec();
             document.getElementById("keyCancelBtn").onclick = function () { overlay.remove(); };
+            /* 动效开关从地图上的悬浮按钮移到设置里，减少常驻按钮密度 */
+            var fxb = document.getElementById("fxToggleBtn");
+            function paintFxBtn() {
+                fxb.textContent = fxOff() ? "已关闭" : "开启";
+                fxb.style.background = fxOff() ? "#eef1f5" : "#dbeafe";
+                fxb.style.borderColor = fxOff() ? "#cfd9e5" : "#bfdbfe";
+            }
+            paintFxBtn();
+            fxb.onclick = function () { toggleFx(); paintFxBtn(); };
             document.getElementById("keySaveBtn").onclick = function () {
                 var k = document.getElementById("amapKeyInput").value.trim();
                 var s = document.getElementById("amapSecInput").value.trim();
@@ -9262,7 +9720,8 @@ var PlanBuildings = (function () {
                     text: "从『" + from + "』出发，沿走廊前行约 " + Math.max(1, Math.round(s.meters)) + " 米" + to });
             } else if (s.kind === "stairs") {
                 out.push({ floor: s.floor, kind: "stairs",
-                    text: "走疏散楼梯" + (Number(s.toFloor) > Number(s.floor) ? "上" : "下") + "至 " + s.toFloor + " 层" +
+                    text: "走楼梯" + (Number(s.toFloor) > Number(s.floor) ? "上" : "下") + "至 " + s.toFloor + " 层" +
+                          (s.nextName && s.nextName !== s.node ? "，在『" + s.nextName + "』出" : "") +
                           "（约 " + Math.round(s.sec) + " 秒）" });
             } else if (s.kind === "elevator") {
                 out.push({ floor: s.floor, kind: "elevator",
@@ -9443,9 +9902,10 @@ var PlanBuildings = (function () {
         s = s.replace(/(stroke=")(?:#5a3a10|#6b4423|#c97a2a|#c9a05a|#d4a86a)(")/gi, '$1#1a3a6b$2');
         // 3b) 家具/设备灰线 → 石板灰，保留「墙深、家具浅」的层级
         s = s.replace(/(stroke=")(?:#777|#777777|#666|#666666|#999|#999999)(")/gi, '$1#64748b$2');
-        // 4) 房间填充统一为综合楼两档灰蓝（走廊 #E0EDF7 保持不变）
-        s = s.replace(/fill="(?:white|#FFFFFF|#EEEEEE|#F2F2F2|#F3F3F3|#F5F5F5|#F0F0F0|#FEF9E7|#f7e2a8)"/gi,
-                      'fill="#e4ebf3"');
+        // 4) 房间填充按功能分档，避免走廊/房间/楼梯全糊成一片（综合楼的层次感）
+        s = s.replace(/fill="(?:white|#FFFFFF|#F3F3F3|#F5F5F5|#F0F0F0)"/gi, 'fill="#eef4fa"');   // 普通房间
+        s = s.replace(/fill="(?:#F2F2F2|#FEF9E7|#f7e2a8)"/gi, 'fill="#e6edf5"');                 // 平台/辅助
+        s = s.replace(/fill="(?:#EEEEEE)"/gi, 'fill="#d9e4ef"');                                  // 楼梯间（加深便于识别）
         // 5) 房间号/设施文字：深蓝 + 白色描边（综合楼标签标准）
         s = s.replace(/(<text\b[^>]*?)fill="(?:black|#111111|#5a3a10|#6b4423|#c97a2a|#c9a05a|#d4a86a)"/gi,
                       '$1fill="#1a3a6b"');
@@ -9556,26 +10016,64 @@ var PlanBuildings = (function () {
 var FireMode = (function () {
     "use strict";
     var on = false;
+    var collapsed = false;       // 接收端「收起」：警报仍在持续，只是全屏层隐藏、留下横幅
+    var role = "publisher";      // publisher=本机发布的管理员 / receiver=接收广播的普通用户
     var floorView = "1";
     var lastRoute = null;
+    var alarmInfo = null;        // { bld, bname, floor, at }
 
-    /* 同域广播：管理员开启后，其它已打开页面/标签页同步进入疏散态（5 分钟内有效，刷新不复活过期警报） */
+    /* 同域广播：管理员开启后，其它已打开页面/标签页同步进入疏散态。
+       发布端每 25 秒写一次心跳；接收端超过 5 分钟没收到心跳即视为警报结束。
+       接收端只能「收起」，绝不能广播解除 —— 解除警报是发布端的管理权限。 */
     var LS_KEY = "hnuFireMode";
     var LS_TTL = 5 * 60 * 1000;
-    var suppress = false, seenT = 0;
+    var HB_MS = 25 * 1000;
+    var suppress = false, seenT = 0, hbTimer = null;
 
+    function bldInfo() {
+        if (planActive()) {
+            var id = PlanBuildings.currentId();
+            return { id: id, name: PlanBuildings.nameOf(id) || "本楼" };
+        }
+        return {
+            id: "zh",
+            name: (typeof currentIndoorBld !== "undefined" && currentIndoorBld && currentIndoorBld.name) || "综合楼"
+        };
+    }
     function broadcast(onoff) {
         try {
-            localStorage.setItem(LS_KEY, JSON.stringify({ on: !!onoff, floor: floorView, t: Date.now() }));
+            var b = bldInfo();
+            localStorage.setItem(LS_KEY, JSON.stringify({
+                on: !!onoff,
+                floor: typeof currentFloor !== "undefined" ? String(currentFloor) : floorView,
+                bld: b.id, bname: b.name,
+                at: (alarmInfo && alarmInfo.at) || Date.now(),
+                t: Date.now()
+            }));
         } catch (e) {}
     }
+    function startHeartbeat() {
+        stopHeartbeat();
+        hbTimer = setInterval(function () {
+            if (on && role === "publisher") broadcast(true);
+        }, HB_MS);
+    }
+    function stopHeartbeat() { if (hbTimer) { clearInterval(hbTimer); hbTimer = null; } }
+
     function applyRemote(v) {
-        if (!v || (v.t && Date.now() - v.t > LS_TTL)) return;
-        suppress = true;
-        try {
-            if (v.on && !on) open(v.floor || "1");
-            else if (!v.on && on) close();
-        } finally { suppress = false; }
+        if (!v || !v.on || (v.t && Date.now() - v.t > LS_TTL)) {
+            /* 管理员已解除，或心跳中断超时：接收端静默回到普通界面并提示一句 */
+            if (on && role === "receiver") forceClose(v && v.bname);
+            return;
+        }
+        if (role === "publisher" && on) return;    // 本机正在发布，忽略自己的回声
+        role = "receiver";
+        alarmInfo = {
+            bld: v.bld || "", bname: v.bname || "",
+            floor: v.floor || "1", at: v.at || v.t || Date.now()
+        };
+        if (!on) open(v.floor || "1", true);
+        else updateAlarmChrome();                  // 已展开/已收起：只刷新来源与时间
     }
 
     function el(id) { return document.getElementById(id); }
@@ -9601,7 +10099,8 @@ var FireMode = (function () {
                 '<div class="fire-sub" id="fireSub"></div></div>' +
                 '<button type="button" class="fire-close" id="fireClose" aria-label="关闭">✕</button>' +
               '</div>' +
-              '<div class="fire-alert">🔥 请立即撤离 · <b>严禁乘坐电梯</b> · 湿毛巾捂口鼻、低姿沿墙前行</div>' +
+              '<div class="fire-alert" id="fireAlert">🔥 请立即撤离 · <b>严禁乘坐电梯</b> · 湿毛巾捂口鼻、低姿沿墙前行</div>' +
+              '<div class="fire-origin" id="fireOrigin" hidden></div>' +
               '<div class="fire-plan" id="firePlan"></div>' +
               '<div class="fire-floors" id="fireFloors"></div>' +
               '<div class="fire-startbar"><label for="fireStartSel">我所在位置</label>' +
@@ -9613,7 +10112,7 @@ var FireMode = (function () {
                 '<button type="button" class="fire-btn" id="fireVoice">🔊 语音播报</button>' +
                 '<button type="button" class="fire-btn" id="fireExit">关闭</button>' +
               '</div>' +
-              '<div class="fire-foot">疏散路线由平面图自动计算，仅供参考；请服从现场消防指挥。' +
+              '<div class="fire-foot" id="fireRoleNote">疏散路线由平面图自动计算，仅供参考；请服从现场消防指挥。' +
                 '电梯在火灾时严禁使用，行动不便者请就近进入避难间等待救援。</div>' +
             '</div>';
         document.body.appendChild(wrap);
@@ -9661,29 +10160,173 @@ var FireMode = (function () {
         } catch (e) {}
     }
 
-    function setBody(onoff) {
-        document.body.classList.toggle("fire-mode", onoff);
+    function setBody() {
+        document.body.classList.toggle("fire-mode", on && !collapsed);
+        document.body.classList.toggle("fire-min", on && collapsed);
     }
 
-    function open(f) {
+    /* ---------- 接收端横幅：收起后仍能看到警报还在 ---------- */
+    function ensureBanner() {
+        var b = el("fireBanner");
+        if (b) return b;
+        b = document.createElement("div");
+        b.id = "fireBanner";
+        b.innerHTML = '<span class="fb-dot" aria-hidden="true"></span>' +
+            '<span class="fb-text" id="fireBannerText"></span>' +
+            '<button type="button" class="fb-open" id="fireBannerOpen">查看疏散路线</button>';
+        document.body.appendChild(b);
+        el("fireBannerOpen").onclick = expand;
+        return b;
+    }
+    function showBanner() {
+        ensureBanner();
+        var t = el("fireBannerText");
+        if (t) t.textContent = "🔥 " + ((alarmInfo && alarmInfo.bname) || "本楼") + " 疏散警报进行中";
+        el("fireBanner").classList.add("show");
+    }
+    function hideBanner() {
+        var b = el("fireBanner");
+        if (b) b.classList.remove("show");
+    }
+    function flash(msg) {
+        var t = el("fireToast");
+        if (!t) {
+            t = document.createElement("div");
+            t.id = "fireToast";
+            document.body.appendChild(t);
+        }
+        t.textContent = msg;
+        t.classList.add("show");
+        clearTimeout(flash._t);
+        flash._t = setTimeout(function () { t.classList.remove("show"); }, 3600);
+    }
+
+    function fmtTime(ts) {
+        try {
+            var d = new Date(ts);
+            return ("0" + d.getHours()).slice(-2) + ":" + ("0" + d.getMinutes()).slice(-2);
+        } catch (e) { return ""; }
+    }
+
+    /* 发布端 / 接收端各自的文案与按钮语义 */
+    function updateAlarmChrome() {
+        var sub = el("fireSub");
+        if (sub) {
+            var bn = (alarmInfo && alarmInfo.bname) || curBuildingName();
+            sub.textContent = bn + " · 第 " + floorView + " 层 · " +
+                (role === "publisher" ? "已向全站广播" : "管理员发布");
+        }
+        var al = el("fireAlert");
+        if (al) {
+            al.innerHTML = role === "publisher"
+                ? "🔥 请立即撤离 · <b>严禁乘坐电梯</b> · 湿毛巾捂口鼻、低姿沿墙前行"
+                : "🔥 全站疏散警报 · <b>严禁乘坐电梯</b> · 湿毛巾捂口鼻、低姿沿墙前行";
+        }
+        var og = el("fireOrigin");
+        if (og) {
+            var bits = [];
+            if (alarmInfo && alarmInfo.at) bits.push("发布 " + fmtTime(alarmInfo.at));
+            if (role === "publisher") {
+                bits.push("本机为发布端，可解除警报");
+            } else {
+                bits.push("由管理员统一发布，个人无法解除");
+                var here = bldInfo().name;
+                if (alarmInfo && alarmInfo.bname && here && here !== alarmInfo.bname) {
+                    bits.push("警报楼栋为「" + alarmInfo.bname + "」，路线按您所在『" + here + "』计算");
+                }
+            }
+            og.textContent = bits.join(" · ");
+            og.hidden = !bits.length;
+        }
+        var ex = el("fireExit");
+        if (ex) ex.textContent = role === "publisher" ? "关闭警报" : "收起";
+        var cl = el("fireClose");
+        if (cl) cl.setAttribute("aria-label", role === "publisher" ? "关闭警报" : "收起（警报继续）");
+        var ft = el("fireRoleNote");
+        if (ft) {
+            ft.textContent = role === "publisher"
+                ? "疏散路线由平面图自动计算，仅供参考；请服从现场消防指挥。电梯在火灾时严禁使用。"
+                : "本警报由管理员统一发布，收起或关闭本页不会解除警报。疏散路线由平面图自动计算，请服从现场消防指挥。";
+        }
+    }
+
+    function open(f, remote) {
         ensureUI();
         on = true;
-        floorView = String(f || (typeof currentFloor !== "undefined" ? currentFloor : "1") || "1");
+        collapsed = false;
+        role = remote ? "receiver" : "publisher";
+        /* 接收端按“自己所在楼层”画疏散路线：警报里的楼层是发布者所处位置，
+           直接套用会把人带到错误的楼层 */
+        var cf = (typeof currentFloor !== "undefined" && currentFloor) ? String(currentFloor) : "";
+        floorView = remote ? (cf || String(f || "1")) : String(f || cf || "1");
+        if (!remote || !alarmInfo) {
+            var b = bldInfo();
+            alarmInfo = { bld: b.id, bname: b.name, floor: floorView, at: Date.now() };
+        }
         fireStart = null;
         showAlt = false;
         var ab = el("fireAltBtn"); if (ab) ab.classList.remove("on");
-        setBody(true);
+        setBody();
+        hideBanner();
+        updateAlarmChrome();
         render();
         speak();
-        if (!suppress) broadcast(true);
+        if (!remote) {
+            if (!suppress) broadcast(true);
+            startHeartbeat();
+        } else {
+            try { if (navigator.vibrate) navigator.vibrate([400, 120, 400, 120, 700]); } catch (e) {}
+        }
     }
-    function close() {
+
+    /* 发布端解除：只有管理员能走这条路 */
+    function disarmAlarm() {
+        var was = on;
         on = false;
-        setBody(false);
+        collapsed = false;
+        role = "publisher";
+        setBody();
+        hideBanner();
+        stopHeartbeat();
         try { if (window.speechSynthesis) window.speechSynthesis.cancel(); } catch (e) {}
-        if (!suppress) broadcast(false);
+        broadcast(false);
+        if (was) flash("火灾警报已解除");
     }
-    function toggle(f) { on ? close() : open(f); }
+
+    /* 接收端被解除 / 心跳超时：静默退出，不广播 */
+    function forceClose(bname) {
+        on = false;
+        collapsed = false;
+        setBody();
+        hideBanner();
+        try { if (window.speechSynthesis) window.speechSynthesis.cancel(); } catch (e) {}
+        flash("应急警报已解除" + (bname ? "（" + bname + "）" : ""));
+    }
+
+    function collapse() {
+        if (!on) return;
+        collapsed = true;
+        setBody();
+        showBanner();
+        try { if (window.speechSynthesis) window.speechSynthesis.cancel(); } catch (e) {}
+    }
+    function expand() {
+        if (!on) return;
+        collapsed = false;
+        setBody();
+        hideBanner();
+        render();
+    }
+
+    /* 接收端点关闭 = 收起；发布端点关闭 = 解除全站警报 */
+    function close() {
+        if (role === "receiver") { collapse(); return; }
+        disarmAlarm();
+    }
+    function toggle(f) {
+        if (on) { role === "receiver" ? expand() : disarmAlarm(); return; }
+        open(f);
+    }
 
     function roomsOf(fl) {
         if (planActive()) return PlanBuildings.coordsOf(fl);
@@ -9692,13 +10335,11 @@ var FireMode = (function () {
 
     function render() {
         if (!on) return;
-        var bname = curBuildingName();
-        var sub = el("fireSub");
-        if (sub) sub.textContent = bname + " · 第 " + floorView + " 层 · 就近疏散";
         renderFloors();
         renderStartSel();
         renderPlan();
         renderSteps();
+        updateAlarmChrome();       /* 楼层切换后来源/角色文案同步刷新 */
         var ab = el("fireAltBtn");
         if (ab) {
             var hasAlt = !!(lastRoute && !lastRoute.error && lastRoute.altRoute && !lastRoute.exitFirst);
@@ -9740,10 +10381,12 @@ var FireMode = (function () {
         else if (typeof currentIndoorBld !== "undefined" && currentIndoorBld && currentIndoorBld.floors) n = currentIndoorBld.floors;
         for (var i = 1; i <= n; i++) {
             (function (f) {
+                /* 火源层高亮：警报发布楼层加 🔥 徽标与红描边，和「当前查看层(.on)」区分 */
+                var isSrc = !!(alarmInfo && String(alarmInfo.floor) === String(f));
                 var b = document.createElement("button");
                 b.type = "button";
-                b.className = "fire-floor" + (String(f) === String(floorView) ? " on" : "");
-                b.textContent = f + "F";
+                b.className = "fire-floor" + (String(f) === String(floorView) ? " on" : "") + (isSrc ? " src" : "");
+                b.textContent = (isSrc ? "🔥 " : "") + f + "F";
                 b.onclick = function () { floorView = String(f); render(); };
                 box.appendChild(b);
             })(i);
@@ -9995,24 +10638,27 @@ var FireMode = (function () {
         for (var sk in stairMap) {
             var sp = stairMap[sk];
             if (!sp) continue;
+            /* 楼梯间高亮（借鉴 fire-mode v4：楼梯突出、底图其余调暗）：
+             * 主疏散楼梯=红色脉冲圈，其余可用楼梯=绿色脉冲圈，一眼分辨"走哪、还能走哪" */
+            var isGoal = !!(ev && !ev.error && ev.stair && sk === ev.stair);
             var sc = document.createElementNS("http://www.w3.org/2000/svg", "circle");
             sc.setAttribute("cx", sp.x); sc.setAttribute("cy", sp.y);
             sc.setAttribute("r", String(stairR));
-            sc.setAttribute("fill", "none");
-            sc.setAttribute("stroke", "#64748b");
-            sc.setAttribute("stroke-width", "2");
-            sc.setAttribute("stroke-dasharray", "4 3");
+            sc.setAttribute("class", "fire-stair-ring" + (isGoal ? " goal" : ""));
+            sc.setAttribute("fill", isGoal ? "rgba(239,68,68,.16)" : "rgba(34,197,94,.13)");
+            sc.setAttribute("stroke", isGoal ? "#ef4444" : "#22c55e");
+            sc.setAttribute("stroke-width", "3");
             overlay.appendChild(sc);
             var stx = document.createElementNS("http://www.w3.org/2000/svg", "text");
             stx.setAttribute("x", sp.x + stairR * 1.4);
             stx.setAttribute("y", sp.y - stairR * 1.2);
             stx.setAttribute("font-size", String(stairFs));
-            stx.setAttribute("font-weight", "600");
-            stx.setAttribute("fill", "#475569");
+            stx.setAttribute("font-weight", "700");
+            stx.setAttribute("fill", isGoal ? "#b91c1c" : "#15803d");
             stx.setAttribute("paint-order", "stroke");
             stx.setAttribute("stroke", "#fff");
             stx.setAttribute("stroke-width", "3");
-            stx.textContent = sk;
+            stx.textContent = isGoal ? (sk + " · 走这里") : (sk + " · 可用");
             overlay.appendChild(stx);
         }
         if (seg && seg.pts && seg.pts.length > 1) {
@@ -10166,6 +10812,9 @@ var FireMode = (function () {
         var admin = /[?&]admin=1(&|$)/.test(location.search);
         var entry = el("fireEntryBtn");
         if (entry) {
+            /* 火灾模式仅管理员可启用：普通用户隐藏入口，防止误触/恶搞；
+               管理员开启后经 LS 广播，所有终端仍会收到并进入疏散接管。 */
+            if (!admin) entry.style.display = "none";
             entry.addEventListener("click", function () {
                 open(typeof currentFloor !== "undefined" ? currentFloor : "1");
             });
@@ -10186,18 +10835,55 @@ var FireMode = (function () {
             applyRemote(v);
         }, 800);
         if (!admin) return;
+
+        /* 管理员按钮随警报状态切换：未发布=布防；已发布=解除（含刷新后找回发布权限） */
         var btn = document.createElement("button");
         btn.type = "button";
         btn.id = "fireAdminBtn";
-        btn.innerHTML = "🚨 紧急火灾模式";
-        btn.onclick = function () { toggle(typeof currentFloor !== "undefined" ? currentFloor : "1"); };
         document.body.appendChild(btn);
+
+        function alarmLive() {
+            try {
+                var raw = localStorage.getItem(LS_KEY);
+                var v = raw ? JSON.parse(raw) : null;
+                return !!(v && v.on && v.t && (Date.now() - v.t < LS_TTL)) ? v : null;
+            } catch (e) { return null; }
+        }
+        function paintAdminBtn() {
+            var v = alarmLive();
+            if (v) {
+                btn.innerHTML = "🛑 解除火灾警报" + (v.bname ? "（" + v.bname + "）" : "");
+                btn.classList.add("disarm");
+                btn.onclick = function () {
+                    var ok = true;
+                    try { ok = window.confirm("确认解除全站火灾疏散警报？所有用户将回到普通界面。"); } catch (e) {}
+                    if (!ok) return;
+                    disarmAlarm();
+                    seenT = 0;
+                    paintAdminBtn();
+                };
+            } else {
+                btn.innerHTML = "🚨 紧急火灾模式";
+                btn.classList.remove("disarm");
+                btn.onclick = function () {
+                    open(typeof currentFloor !== "undefined" ? currentFloor : "1");
+                    setTimeout(paintAdminBtn, 300);
+                };
+            }
+        }
+        paintAdminBtn();
+        setInterval(paintAdminBtn, 2000);
     }
 
     if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", boot);
     else boot();
 
-    return { open: open, close: close, toggle: toggle, isOn: function () { return on; } };
+    return {
+        open: open, close: close, toggle: toggle,
+        disarm: disarmAlarm,
+        isOn: function () { return on; },
+        role: function () { return role; }
+    };
 })();
 </script>
 
@@ -10256,6 +10942,43 @@ body.fire-mode #fireOverlay{display:flex}
   border:1px solid rgba(239,68,68,.35);color:#fecaca;font-size:12.5px;line-height:1.5;
 }
 .fire-alert b{color:#fff}
+.fire-origin{
+  margin:-4px 14px 10px;padding:0 2px;font-size:11.5px;line-height:1.5;color:#fca5a5;
+}
+.fire-origin[hidden]{display:none}
+/* 接收端收起后的常驻警报横幅：警报未解除，用户随时能回到疏散路线 */
+#fireBanner{
+  position:fixed;left:12px;right:12px;top:calc(env(safe-area-inset-top,0px) + 64px);
+  z-index:8990;display:none;align-items:center;gap:10px;
+  max-width:520px;margin:0 auto;padding:10px 12px;border-radius:12px;
+  background:linear-gradient(90deg,#b91c1c,#ef4444);color:#fff;border:1px solid rgba(255,255,255,.18);
+  font:600 13px/1.3 -apple-system,"PingFang SC","Microsoft YaHei",sans-serif;
+  box-shadow:0 10px 26px rgba(185,28,28,.45);
+}
+#fireBanner.show{display:flex}
+#fireBanner .fb-dot{
+  flex:0 0 auto;width:9px;height:9px;border-radius:50%;background:#fff;
+  animation:fireBlink 1.1s ease-in-out infinite;
+}
+#fireBanner .fb-text{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#fireBanner .fb-open{
+  flex:0 0 auto;min-height:32px;padding:0 10px;border-radius:8px;cursor:pointer;
+  border:1px solid rgba(255,255,255,.45);background:rgba(255,255,255,.16);color:#fff;
+  font:600 12px/1 -apple-system,"PingFang SC","Microsoft YaHei",sans-serif;
+}
+#fireBanner .fb-open:active{transform:scale(.97)}
+#fireToast{
+  position:fixed;left:50%;bottom:calc(24px + env(safe-area-inset-bottom,0px));
+  transform:translate(-50%,12px);z-index:2147483600;max-width:86vw;
+  padding:9px 14px;border-radius:999px;background:rgba(15,23,42,.92);color:#e5e7eb;
+  font:600 12.5px/1.3 -apple-system,"PingFang SC","Microsoft YaHei",sans-serif;
+  opacity:0;pointer-events:none;transition:opacity .22s,transform .22s;
+}
+#fireToast.show{opacity:1;transform:translate(-50%,0)}
+#fireAdminBtn.disarm{
+  background:linear-gradient(180deg,#0f172a,#1e293b);border-color:#334155;
+  box-shadow:0 10px 26px rgba(15,23,42,.45);
+}
 .fire-plan{
   position:relative;margin:0 14px;flex:1 1 auto;min-height:210px;
   background:#f4f6f9;border-radius:12px;overflow:hidden;border:1px solid rgba(255,255,255,.08);
@@ -10270,6 +10993,13 @@ body.fire-mode #fireOverlay{display:flex}
   color:#cbd5e1;font-size:12.5px;font-weight:600;cursor:pointer;
 }
 .fire-floor.on{background:#ef4444;border-color:#ef4444;color:#fff}
+/* 火源层标记：红描边+🔥，与「当前查看层(.on 红底)」区分 */
+.fire-floor.src{border-color:#f87171;color:#fecaca;box-shadow:0 0 0 1px rgba(239,68,68,.55)}
+.fire-floor.src.on{color:#fff}
+/* 疏散平面图：底图调暗让楼梯与路线突出；楼梯圈脉冲（主=红/备=绿） */
+.fire-plan > svg.fire-plan-svg{opacity:.55;filter:saturate(.45)}
+.fire-stair-ring{animation:fireStairPulse 1.6s ease-in-out infinite}
+@keyframes fireStairPulse{0%,100%{stroke-opacity:.4}50%{stroke-opacity:1}}
 .fire-startbar{display:flex;align-items:center;gap:8px;padding:9px 14px 0}
 .fire-startbar label{flex:0 0 auto;font-size:12px;color:#cbd5e1}
 .fire-startbar select{
@@ -10309,6 +11039,7 @@ body.fire-mode #fireOverlay{display:flex}
 @keyframes fireBlink{0%,100%{opacity:1}50%{opacity:.45}}
 @media (prefers-reduced-motion: reduce){
   .fire-badge{animation:none}
+  .fire-stair-ring{animation:none}
 }
 @media (max-height:640px){
   .fire-steps{max-height:24vh}
@@ -11159,5 +11890,423 @@ body.fire-mode #fireOverlay{display:flex}
 
 
 </script>
+
+<!-- =====================================================================
+     统一管理员弹窗：出厂令牌 → 设置密码 → 登录 / 强制重置（单弹窗多模式）
+     ---------------------------------------------------------------------
+     ① 点「⚙ 管理员模式」一律先弹本窗（每次进入都要重新验证，无会话免密）
+     ② 未设管理员密码 → 先输「出厂安全令牌」才有资格设置管理员密码（门槛）
+     ③ 已设密码 → 直接输管理员密码进入；连续输错令牌 3 次本次会话锁定
+     ④ 管理员面板底部「🔑 强制重置管理员密码」→ 需再输一次令牌
+     存储格式与 floor-lock 模块一致：
+       localStorage["floorLockAdminPass"] = {"hash":"sha256:<hex>","at":时间戳}
+     ===================================================================== -->
+<style id="admin-login-modal-styles">
+    #adminLoginOverlay {
+        position: fixed; inset: 0; z-index: 2147483700;   /* 比火灾层(2147483600)更高 */
+        display: none; align-items: center; justify-content: center; padding: 20px;
+        background: rgba(8, 10, 16, .66);
+        backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px);
+    }
+    #adminLoginOverlay.show { display: flex; }
+    #adminLoginOverlay .alm-card {
+        position: relative; width: 100%; max-width: 380px; box-sizing: border-box;
+        padding: 0 24px 20px; border-radius: 18px; overflow: hidden;
+        background: linear-gradient(180deg, #1d2434 0%, #171d2b 100%);
+        border: 1px solid rgba(255, 255, 255, .12);
+        box-shadow: 0 30px 70px rgba(0, 0, 0, .6);
+        color: #e8edf6;
+        font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+        animation: almIn .2s ease-out;
+    }
+    @keyframes almIn { from { opacity: 0; transform: translateY(-12px) scale(.97); } to { opacity: 1; transform: none; } }
+    #adminLoginOverlay .alm-accent {
+        position: absolute; top: 0; left: 0; right: 0; height: 3px;
+        background: linear-gradient(90deg, #3b7bff, #7c5cff 55%, #38bdf8);
+    }
+    #adminLoginOverlay .alm-badge {
+        width: 46px; height: 40px; margin: 22px auto 10px; border-radius: 12px;
+        display: flex; align-items: center; justify-content: center; font-size: 20px;
+        background: linear-gradient(135deg, rgba(59, 123, 255, .25), rgba(124, 92, 255, .25));
+        border: 1px solid rgba(120, 150, 255, .35);
+        box-shadow: 0 6px 18px rgba(59, 123, 255, .22), inset 0 1px 0 rgba(255, 255, 255, .12);
+    }
+    #adminLoginOverlay .alm-title { margin: 0; font-size: 17px; font-weight: 700; color: #fff; text-align: center; letter-spacing: .02em; }
+    #adminLoginOverlay .alm-sub { margin: 8px 0 14px; font-size: 12.5px; line-height: 1.6; color: #9aa7bd; text-align: center; }
+    #adminLoginOverlay .alm-steps { display: flex; justify-content: center; gap: 6px; margin: 0 0 12px; }
+    #adminLoginOverlay .alm-step { width: 22px; height: 4px; border-radius: 2px; background: rgba(255, 255, 255, .14); transition: background .2s; }
+    #adminLoginOverlay .alm-step.on { background: linear-gradient(90deg, #3b7bff, #7c5cff); }
+    #adminLoginOverlay .alm-input {
+        width: 100%; box-sizing: border-box; height: 44px; margin-bottom: 10px; padding: 0 14px;
+        font-size: 15px; color: #fff; background: #121722;
+        border: 1px solid rgba(255, 255, 255, .18); border-radius: 10px; outline: none;
+        transition: border-color .15s, box-shadow .15s;
+    }
+    #adminLoginOverlay .alm-input:focus { border-color: #4f8cff; box-shadow: 0 0 0 3px rgba(79, 140, 255, .22); }
+    #adminLoginOverlay .alm-input[hidden] { display: none; }
+    #adminLoginOverlay .alm-err { min-height: 18px; margin: 2px 0 0; font-size: 12.5px; color: #ff8a80; text-align: center; }
+    #adminLoginOverlay .alm-actions { display: flex; gap: 10px; margin-top: 14px; }
+    #adminLoginOverlay .alm-actions button {
+        flex: 1; height: 42px; font: inherit; font-size: 14px; font-weight: 600;
+        border-radius: 10px; cursor: pointer; border: 1px solid transparent;
+        transition: filter .15s, background .15s;
+    }
+    #adminLoginOverlay .alm-ok { color: #fff; background: linear-gradient(135deg, #3b7bff, #6a5cff); box-shadow: 0 8px 20px rgba(59, 123, 255, .3); }
+    #adminLoginOverlay .alm-ok:hover { filter: brightness(1.08); }
+    #adminLoginOverlay .alm-ok:disabled { opacity: .55; cursor: not-allowed; }
+    #adminLoginOverlay .alm-cancel { color: #c3cddd; background: rgba(255, 255, 255, .07); border-color: rgba(255, 255, 255, .16); }
+    #adminLoginOverlay .alm-cancel:hover { background: rgba(255, 255, 255, .13); }
+    #adminLoginOverlay .alm-foot { margin-top: 12px; text-align: center; }
+    #adminLoginOverlay .alm-link { font-size: 12px; color: #7ea4ff; cursor: pointer; text-decoration: none; background: none; border: none; padding: 4px; font: inherit; }
+    #adminLoginOverlay .alm-link:hover { text-decoration: underline; }
+    #adminLoginOverlay .alm-shake { animation: almShake .3s; }
+    @keyframes almShake { 0%, 100% { transform: translateX(0); } 25% { transform: translateX(-7px); } 50% { transform: translateX(7px); } 75% { transform: translateX(-4px); } }
+
+    /* 管理员面板里的「强制重置」按钮 */
+    #adminResetBtn {
+        display: inline-flex; align-items: center; gap: 6px; margin: 10px 0 0;
+        padding: 5px 10px; font: inherit; font-size: 12px; font-weight: 600;
+        color: #9a3412; background: #fff7ed; border: 1px solid #fdba74; border-radius: 7px; cursor: pointer;
+    }
+    #adminResetBtn:hover { background: #ffedd5; }
+    #adminResetBtn:focus-visible { outline: 2px solid #f97316; outline-offset: 2px; }
+</style>
+
+<div id="adminLoginOverlay" aria-hidden="true">
+    <div class="alm-card" role="dialog" aria-modal="true" aria-labelledby="almTitle">
+        <span class="alm-accent" aria-hidden="true"></span>
+        <div class="alm-badge" aria-hidden="true">🛡️</div>
+        <h3 class="alm-title" id="almTitle">管理员验证</h3>
+        <div class="alm-steps" id="almSteps" aria-hidden="true"></div>
+        <p class="alm-sub" id="almSub">请输入密码。</p>
+        <input class="alm-input" id="almInput" type="password" autocomplete="current-password"
+               inputmode="text" placeholder="密码" aria-label="密码">
+        <input class="alm-input" id="almInput2" type="password" autocomplete="new-password"
+               inputmode="text" placeholder="再次输入确认" aria-label="再次输入确认密码" hidden>
+        <p class="alm-err" id="almErr" role="alert"></p>
+        <div class="alm-actions">
+            <button type="button" class="alm-cancel" id="almCancel">取消</button>
+            <button type="button" class="alm-ok" id="almOk">确定</button>
+        </div>
+        <div class="alm-foot"><button type="button" class="alm-link" id="almForgot" hidden>忘记密码？用出厂令牌强制重置</button></div>
+    </div>
+</div>
+
+<script id="admin-login-modal-script">
+/* admin-login:modal —— 出厂令牌 → 设置密码 → 登录 / 重置（每次进入都重新验证） */
+(function () {
+    'use strict';
+
+    /* ★★★ 出厂安全令牌（管理员资格门槛，部署后请修改此常量） ★★★ */
+    var MASTER_KEY = '888888';
+    var MAX_TOKEN_TRIES = 3;                  // 连续输错令牌次数上限（本次会话内）
+
+    var PASS_KEY = 'floorLockAdminPass';      // 管理员密码（与 floor-lock 模块同结构）
+    var SESS_KEY = 'floorLockAdminSess';      // 会话标记（模块据此跳过自己的密码门）
+    var JUST_KEY = 'fireAdminJustVerified';   // 一次性放行标记（给页头"强制重验"脚本看）
+    var LEGACY_KEY = 'fireAdminLegacySetup';  // 无 WebCrypto 时回退模块密码门的标记
+
+    var overlay = null, card = null, input1 = null, input2 = null, errEl = null,
+        subEl = null, titleEl = null, okBtn = null, cancelBtn = null,
+        stepsEl = null, forgotEl = null;
+    var mode = 'login';      // token | setup | login | reset
+    var tokenTries = 0;      // 本次会话内令牌错误次数
+    var locked = false;      // 错误次数用尽后锁定
+
+    function isAdminMode() {
+        try { return new URLSearchParams(window.location.search).get('admin') === '1'; }
+        catch (e) { return /[?&]admin=1(&|$)/.test(window.location.search || ''); }
+    }
+
+    /* ---------- 存储（严格对齐模块的 JSON 结构） ---------- */
+    function readHash() {
+        var raw = '';
+        try { raw = window.localStorage.getItem(PASS_KEY) || ''; } catch (e) { return ''; }
+        if (!raw) return '';
+        try {
+            var p = JSON.parse(raw);
+            if (p && typeof p.hash === 'string') return p.hash;
+        } catch (e) { /* 兼容旧的裸字符串 */ }
+        return raw;
+    }
+    function hasPassword() { return !!readHash(); }
+    function writeHash(hex) {
+        try {
+            window.localStorage.setItem(PASS_KEY, JSON.stringify({ hash: 'sha256:' + hex, at: Date.now() }));
+            return true;
+        } catch (e) { return false; }
+    }
+    function clearHash() {
+        try { window.localStorage.removeItem(PASS_KEY); return true; } catch (e) { return false; }
+    }
+    function sha256Hex(text) {
+        if (!window.crypto || !window.crypto.subtle || !window.TextEncoder) return null;
+        return window.crypto.subtle.digest('SHA-256', new TextEncoder().encode(text))
+            .then(function (buf) {
+                var b = new Uint8Array(buf), hex = '';
+                for (var i = 0; i < b.length; i++) hex += ('0' + b[i].toString(16)).slice(-2);
+                return hex;
+            });
+    }
+
+    /* ---------- DOM ---------- */
+    function build() {
+        overlay = document.getElementById('adminLoginOverlay');
+        if (!overlay) return false;
+        card = overlay.querySelector('.alm-card');
+        titleEl = document.getElementById('almTitle');
+        input1 = document.getElementById('almInput');
+        input2 = document.getElementById('almInput2');
+        errEl = document.getElementById('almErr');
+        subEl = document.getElementById('almSub');
+        okBtn = document.getElementById('almOk');
+        cancelBtn = document.getElementById('almCancel');
+        stepsEl = document.getElementById('almSteps');
+        forgotEl = document.getElementById('almForgot');
+
+        cancelBtn.addEventListener('click', close);
+        okBtn.addEventListener('click', submit);
+        [input1, input2].forEach(function (el) {
+            el.addEventListener('keydown', function (e) {
+                if (e.key === 'Enter') { e.preventDefault(); submit(); }
+            });
+        });
+        overlay.addEventListener('click', function (e) { if (e.target === overlay) close(); });
+        document.addEventListener('keydown', function (e) {
+            if (e.key === 'Escape' && overlay.classList.contains('show')) close();
+        });
+        forgotEl.addEventListener('click', function () { setMode('reset'); });
+        return true;
+    }
+
+    var MODES = {
+        token: {
+            title: '出厂安全令牌',
+            sub: '首次使用：请输入出厂安全令牌，验证通过后才有资格设置管理员密码。',
+            ok: '验证令牌', ph1: '出厂安全令牌', steps: 1
+        },
+        setup: {
+            title: '设置管理员密码',
+            sub: '令牌验证通过。请设置管理员密码（至少 4 位），保存后直接进入管理员界面。',
+            ok: '保存并进入', ph1: '管理员密码', hasSecond: true, steps: 2
+        },
+        login: {
+            title: '管理员验证',
+            sub: '为保障安全，每次进入都需重新输入管理员密码。',
+            ok: '进入', ph1: '管理员密码', steps: 0, showForgot: true
+        },
+        reset: {
+            title: '强制重置管理员密码',
+            sub: '此操作会清空现有管理员密码。请输入出厂安全令牌确认。',
+            ok: '重置', ph1: '出厂安全令牌', steps: 0
+        }
+    };
+
+    function renderSteps(n) {
+        if (!stepsEl) return;
+        if (!n) { stepsEl.innerHTML = ''; return; }
+        var html = '';
+        for (var i = 1; i <= 2; i++) html += '<span class="alm-step' + (i <= n ? ' on' : '') + '"></span>';
+        stepsEl.innerHTML = html;
+    }
+
+    function setMode(next) {
+        mode = next;
+        var cfg = MODES[next] || MODES.login;
+        titleEl.textContent = cfg.title;
+        subEl.textContent = cfg.sub;
+        input1.value = '';
+        input1.setAttribute('placeholder', cfg.ph1 || '密码');
+        input1.type = (next === 'login' || next === 'setup') ? 'password' : 'text';
+        input2.hidden = !cfg.hasSecond;
+        input2.value = '';
+        okBtn.textContent = cfg.ok;
+        okBtn.disabled = false;
+        errEl.textContent = '';
+        renderSteps(cfg.steps || 0);
+        if (forgotEl) forgotEl.hidden = !cfg.showForgot;
+    }
+
+    function open(kind) {
+        if (!overlay && !build()) return;
+        if (kind === 'reset') setMode('reset');
+        else setMode(hasPassword() ? 'login' : 'token');
+        if (locked) {
+            errEl.textContent = '安全令牌错误次数过多，已拒绝访问。请刷新页面后重试。';
+            okBtn.disabled = true;
+        }
+        overlay.classList.add('show');
+        overlay.setAttribute('aria-hidden', 'false');
+        setTimeout(function () { try { input1.focus(); } catch (e) {} }, 30);
+    }
+
+    function close() {
+        if (!overlay) return;
+        overlay.classList.remove('show');
+        overlay.setAttribute('aria-hidden', 'true');
+        if (errEl) errEl.textContent = '';
+        okBtn.disabled = false;
+    }
+
+    function goAdmin() {
+        try {
+            window.sessionStorage.setItem(SESS_KEY, 'ok');
+            window.sessionStorage.setItem(JUST_KEY, String(Date.now()));
+        } catch (e) {}
+        window.location.href = '?admin=1';
+    }
+    function goNormal() {
+        try {
+            var url = new URL(window.location.href);
+            url.searchParams.delete('admin');
+            window.location.replace(url.toString());
+        } catch (e) { window.location.href = window.location.pathname; }
+    }
+    function fail(msg) {
+        errEl.textContent = msg;
+        if (card) {
+            card.classList.remove('alm-shake');
+            void card.offsetWidth;
+            card.classList.add('alm-shake');
+        }
+    }
+    function tokenFail() {
+        tokenTries++;
+        if (tokenTries >= MAX_TOKEN_TRIES) {
+            locked = true;
+            errEl.textContent = '安全令牌连续输错 ' + MAX_TOKEN_TRIES + ' 次，已拒绝访问。请刷新页面后重试。';
+            okBtn.disabled = true;
+            input1.value = '';
+            return;
+        }
+        fail('安全令牌不正确，还可尝试 ' + (MAX_TOKEN_TRIES - tokenTries) + ' 次。');
+        input1.value = '';
+    }
+
+    /* ---------- 提交 ---------- */
+    function submit() {
+        if (okBtn.disabled) return;
+        var p1 = String(input1.value || '');
+        var p2 = String(input2.value || '');
+
+        if (mode === 'token') {
+            if (!p1) { fail('请输入出厂安全令牌。'); return; }
+            if (p1 === MASTER_KEY) {
+                tokenTries = 0;
+                setMode('setup');
+                try { input1.focus(); } catch (e) {}
+                return;
+            }
+            tokenFail();
+            return;
+        }
+
+        if (mode === 'reset') {
+            if (!p1) { fail('请输入出厂安全令牌。'); return; }
+            if (p1 !== MASTER_KEY) { tokenFail(); return; }
+            tokenTries = 0;
+            clearHash();
+            try { window.sessionStorage.removeItem(SESS_KEY); } catch (e) {}
+            try { window.sessionStorage.removeItem(JUST_KEY); } catch (e) {}
+            close();
+            goNormal();          // 回到普通页面，系统处于"未设置密码"的初始状态
+            return;
+        }
+
+        if (mode === 'setup') {
+            if (p1.length < 4) { fail('密码至少 4 位。'); return; }
+            if (p1 !== p2) { fail('两次输入的密码不一致。'); input2.value = ''; return; }
+            okBtn.disabled = true;
+            okBtn.textContent = '保存中…';
+            var sp = sha256Hex(p1);
+            if (!sp) {   // 没有 WebCrypto：回退模块自己的设置卡片（走降级标记）
+                try { window.sessionStorage.setItem(LEGACY_KEY, '1'); } catch (e) {}
+                try { window.sessionStorage.removeItem(SESS_KEY); } catch (e) {}
+                try { window.sessionStorage.removeItem(JUST_KEY); } catch (e) {}
+                window.location.href = '?admin=1';
+                return;
+            }
+            sp.then(function (hex) {
+                okBtn.disabled = false;
+                okBtn.textContent = '保存并进入';
+                if (!writeHash(hex)) { fail('保存失败（浏览器可能禁用了本地存储）。'); return; }
+                close();
+                goAdmin();
+            });
+            return;
+        }
+
+        /* 登录 */
+        if (!p1) { fail('请输入密码。'); return; }
+        var stored = readHash();
+        if (!stored) { setMode('token'); return; }   // 密码被清掉了 → 回到令牌流程
+        if (stored.indexOf('plain:') === 0) {
+            if (p1 === stored.slice(6)) { close(); goAdmin(); } else fail('密码不正确，请重试。');
+            return;
+        }
+        if (stored.indexOf('sha256:') !== 0) {
+            if (p1 === stored) { close(); goAdmin(); } else fail('密码不正确，请重试。');
+            return;
+        }
+        var expect = stored.slice(7).toLowerCase();
+        var dg = sha256Hex(p1);
+        if (!dg) { fail('当前环境不支持本地加密校验，请用 http 方式打开。'); return; }
+        okBtn.disabled = true;
+        okBtn.textContent = '验证中…';
+        dg.then(function (hex) {
+            okBtn.disabled = false;
+            okBtn.textContent = '进入';
+            if (hex === expect) { close(); goAdmin(); }
+            else { fail('密码不正确，请重试。'); input1.value = ''; try { input1.focus(); } catch (e) {} }
+        });
+    }
+
+    /* ---------- 入口拦截：所有指向 ?admin=1 的链接一律先过弹窗 ---------- */
+    document.addEventListener('click', function (e) {
+        if (isAdminMode()) return;
+        var a = e.target;
+        while (a && a !== document && a.tagName !== 'A') a = a.parentNode;
+        if (!a || a === document || a.tagName !== 'A') return;
+        var href = a.getAttribute('href') || '';
+        if (href.indexOf('admin=1') === -1) return;
+        e.preventDefault();
+        open();
+    }, true);
+
+    /* ---------- 管理员面板里的「强制重置」按钮 ---------- */
+    function ensureResetBtn() {
+        var bar = document.getElementById('lock-bar');
+        if (!bar) return;
+        var rootEl = bar.querySelector('.fl-root');
+        if (!rootEl) return;
+        if (rootEl.querySelector('.fl-gate')) return;          // 还没登录，不显示
+        if (!rootEl.querySelector('.fl-admin-list')) return;   // 没有配置面板
+        var btn = document.getElementById('adminResetBtn');
+        if (!btn) {
+            btn = document.createElement('button');
+            btn.id = 'adminResetBtn';
+            btn.type = 'button';
+            btn.textContent = '🔑 强制重置管理员密码';
+            btn.title = '需要输入出厂安全令牌 (MASTER_KEY)';
+            btn.addEventListener('click', function () { open('reset'); });
+        }
+        if (btn.parentNode !== rootEl) rootEl.appendChild(btn);
+    }
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', function () { setInterval(ensureResetBtn, 1000); });
+    } else {
+        setInterval(ensureResetBtn, 1000);
+    }
+
+    window.AdminLogin = {
+        open: open,
+        close: close,
+        mode: function () { return mode; },
+        hasPassword: hasPassword,
+        locked: function () { return locked; }   // 调试/测试用
+    };
+})();
+</script>
+
 </body>
 </html>
