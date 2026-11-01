@@ -6700,12 +6700,12 @@ var IndoorRouter = (function () {
 
         /* ---- AI Provider 配置：支持多家模型并行调用 ----
          * 每个 provider 需配置：name / endpoint / apiKey / model / enabled
-         * endpoint 可为后端代理 /api/ai/chat（推荐，避免 CORS）或直连 OpenAI 兼容接口 */
+         * endpoint 为目标 API 地址（由 /api/chat Function 代理转发，规避 CORS） */
         var WQ_AI_CONFIG = {
             /* 是否启用 AI 赋能（false 时完全走规则引擎） */
             enabled: true,
-            /* 后端代理地址（由服务器转发 AI 请求，隐藏 key、规避 CORS） */
-            proxyEndpoint: "/api/ai/chat",
+            /* 后端代理地址（Cloudflare Pages Function /api/chat，规避 CORS） */
+            proxyEndpoint: "/api/chat",
             /* 多 Provider 列表：同时调用，取评分最高者 */
             providers: [
                 { id: "provider_a", name: "腾讯混元hy3", endpoint: "https://tokenhub.tencentmaas.com/v1/chat/completions", apiKey: "sk-6lkjRcpZEFHHWoGAsKMdSsLWLJuU6upkJlKxqcqQ75VMxYDw", model: "hy3", enabled: true },
@@ -6734,7 +6734,10 @@ var IndoorRouter = (function () {
                     var cfg = JSON.parse(saved);
                     if (cfg.providers) WQ_AI_CONFIG.providers = cfg.providers;
                     if (typeof cfg.enabled === "boolean") WQ_AI_CONFIG.enabled = cfg.enabled;
-                    if (cfg.proxyEndpoint) WQ_AI_CONFIG.proxyEndpoint = cfg.proxyEndpoint;
+                    /* 迁移：旧版代理 /api/ai/chat 已弃用，统一改用 Pages Function /api/chat */
+                    if (cfg.proxyEndpoint && cfg.proxyEndpoint !== "/api/ai/chat") {
+                        WQ_AI_CONFIG.proxyEndpoint = cfg.proxyEndpoint;
+                    }
                 }
             } catch (e) {}
             /* 兜底：若加载后没有任何启用的 Provider，恢复默认（含hy3） */
@@ -6885,15 +6888,16 @@ var IndoorRouter = (function () {
          * 多 AI 路由器：并行调用多个 Provider，评分选最优
          * ================================================================ */
         var WQ_AI_ROUTER = {
-            /* 调用单个 Provider */
+            /* 调用单个 Provider —— 通过 Pages Function 代理转发（规避 CORS） */
             _callProvider: function (provider, messages, cb) {
-                var self = this;
+                /* 通过 Cloudflare Pages Function /api/chat 代理，规避浏览器 CORS */
+                var url = WQ_AI_CONFIG.proxyEndpoint || "/api/chat";
                 var payload = {
-                    provider: provider,
-                    messages: messages,
-                    timeout: WQ_AI_CONFIG.timeout
+                    endpoint: provider.endpoint,
+                    apiKey: provider.apiKey,
+                    model: provider.model,
+                    messages: messages
                 };
-                var url = WQ_AI_CONFIG.proxyEndpoint || provider.endpoint;
                 var timedOut = false;
                 var timer = setTimeout(function () {
                     timedOut = true;
