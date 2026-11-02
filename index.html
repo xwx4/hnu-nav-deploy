@@ -7,6 +7,9 @@
     <meta name="theme-color" media="(prefers-color-scheme: light)" content="#eef2f8">
     <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#0f172a">
     <title>立体导航（单文件版）</title>
+    <!-- KaTeX 数学公式渲染 -->
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+    <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
 <!-- 管理员密码门：每次进入 ?admin=1 都强制重新验证（不清除同页内已验证状态） -->
 <script id="admin-reauth-onload">
 /* fire-mode:reauth —— 每次进 ?admin=1 都要验证；未设密码时必须先走"出厂令牌"弹窗 */
@@ -1487,6 +1490,7 @@ body.no-motion .layer-base.plan-loading::after { animation: none; }
 .wq-ai-row { display: flex; align-items: flex-start; gap: 10px; margin-bottom: 8px; }
 .wq-ai-row:last-child { margin-bottom: 0; }
 .wq-ai-label { flex: 0 0 44px; font-size: 13px; color: #475569; padding-top: 7px; }
+.wq-ai-readonly { font-size: 13px; color: #1e293b; font-weight: 600; padding: 6px 12px; background: #f1f5f9; border-radius: 6px; display: inline-block; }
 .wq-actions { display: flex; gap: 10px; margin-bottom: 12px; }
 .wq-btn {
     flex: 1; padding: 10px; border-radius: 8px; border: none; font-size: 14px;
@@ -7147,6 +7151,42 @@ var IndoorRouter = (function () {
         }
 
         /* ================================================================
+         * 一站式智能分析：讲解 + 母题溯源 + 分层推荐，合并为一次 AI 调用
+         * 目标：秒级响应（3-4s），避免多次往返
+         * 输入：原题文本、学科、知识点、原题难度
+         * 输出：{ explain, mother:{text,answer,kpExplain,relation}, recs:[{text,answer,solution,diff,layer}] }
+         * ================================================================ */
+        function aiFullPipeline(text, subject, kps, origDiff, cb) {
+            if (!WQ_AI_CONFIG.enabled) { cb(new Error("ai_disabled"), null); return; }
+            var kpList = (kps && kps.length) ? kps.join("、") : "（请根据题目内容判断）";
+            var d = Math.max(1, Math.min(10, origDiff || 5));
+            var sysPrompt = "你是一位" + (subject || "全科") + "教研专家。请一次性完成三件事，严格按JSON返回（不要其他文字）：\n" +
+                '{"explain":"原题完整讲解（思路+步骤+答案，数学公式用LaTeX，如$x^2$、$\\\\frac{a}{b}$）",' +
+                '"mother":{"text":"母题题干（追溯到该知识点最根本、最原型的题目）","answer":"母题答案解析","kpExplain":"讲透母知识点：用最精当的语言点明该知识点的本质、定义、核心公式/定理、适用边界、常见误区，覆盖所有知识源","relation":"原题如何从母题演变而来"},' +
+                '"recs":[{"text":"推荐题题干","answer":"答案","solution":"解析","diff":1-10,"layer":"基础|变式|拔高"}]}' +
+                "\n推题要求：3道题，分别为基础巩固(L" + Math.max(1, d - 2) + ")、变式迁移(L" + d + ")、思维拔高(L" + Math.min(10, d + 1) + ")。" +
+                "必须以知识点为根，可拓展可深化，严禁与原题题型简单重复或照抄做法。数学公式用LaTeX。";
+            var messages = [
+                { role: "system", content: sysPrompt },
+                { role: "user", content: "学科：" + (subject || "未确定") + "\n知识点：" + kpList + "\n原题难度：L" + d + "\n原题：" + text }
+            ];
+            WQ_AI_ROUTER.call(messages, "generate", function (err, res) {
+                if (err) { cb(err, null); return; }
+                var result = null;
+                try {
+                    var m = res.text.match(/\{[\s\S]*\}/);
+                    if (m) result = JSON.parse(m[0]);
+                } catch (e) {}
+                if (!result) { cb(new Error("parse_failed"), null); return; }
+                /* 规范化 */
+                result.explain = result.explain || "";
+                result.mother = result.mother || { text: "", answer: "", kpExplain: "", relation: "" };
+                result.recs = Array.isArray(result.recs) ? result.recs.filter(function (r) { return r && r.text; }) : [];
+                cb(null, result);
+            });
+        }
+
+        /* ================================================================
          * AI 题目权威性/质量评分（用于好题判定 & 题库入库筛选）
          * 输入：题目对象 {text, answer, solution, kp, diff, source}
          * 输出：0-1 分数 + 各维度 {authority, answerable, relevant, clarity}
@@ -7213,7 +7253,7 @@ var IndoorRouter = (function () {
                     if (!q.text) continue;
                     var v = WQ_PIPELINE_B.verifyQuestion({
                         text: q.text, answer: q.answer || "（AI生成，暂无答案）",
-                        source: "AI生成-" + res.provider, source_url: "", verify_status: "pending"
+                        source: "智能生成-" + res.provider, source_url: "", verify_status: "pending"
                     });
                     if (v.ok) {
                         var tags = WQ_PIPELINE_B.tagQuestion(q, subject);
@@ -7221,7 +7261,7 @@ var IndoorRouter = (function () {
                             text: q.text, answer: q.answer || "", idea: q.idea || "",
                             solution: q.solution || "", pitfall: "", method: "",
                             diff: q.diff || tags.diff, kp: tags.kps, ability: [],
-                            source: "AI生成-" + res.provider, verify_status: "passed",
+                            source: "智能生成-" + res.provider, verify_status: "passed",
                             _aiGenerated: true
                         });
                     }
@@ -7554,6 +7594,42 @@ var IndoorRouter = (function () {
         }
         function esc(s) { return String(s == null ? "" : s).replace(/[<>&]/g, function (c) { return { "<": "&lt;", ">": "&gt;", "&": "&amp;" }[c]; }); }
 
+        /* 数学公式渲染：识别 $...$ / $$...$$ / \(...\) / \[...\]，用 KaTeX 渲染
+         * 非公式部分先 HTML 转义，公式部分用 katex.renderToString 输出 HTML */
+        function renderMath(text) {
+            var s = String(text == null ? "" : text);
+            if (!window.katex) return esc(s); /* KaTeX 未加载时降级为纯文本 */
+            /* 按公式分隔符切分：$$...$$ 优先，再 $...$，再 \( \) \[ \] */
+            var parts = [];
+            var regex = /(\$\$[\s\S]+?\$\$|\\\[[\s\S]+?\\\]|\\\([\s\S]+?\\\)|\$[^$\n]+\$)/g;
+            var lastIndex = 0;
+            var m;
+            while ((m = regex.exec(s)) !== null) {
+                if (m.index > lastIndex) parts.push({ type: "text", val: s.slice(lastIndex, m.index) });
+                parts.push({ type: "math", val: m[0] });
+                lastIndex = regex.lastIndex;
+            }
+            if (lastIndex < s.length) parts.push({ type: "text", val: s.slice(lastIndex) });
+            var html = "";
+            for (var i = 0; i < parts.length; i++) {
+                if (parts[i].type === "text") {
+                    html += esc(parts[i].val);
+                } else {
+                    var raw = parts[i].val;
+                    var display = /^\$\$|^\\\[/.test(raw);
+                    var expr = raw.replace(/^\$\$|^\$|^\$|^\$\$$|^\\\(|^\\\)|^\\\[|^\\\]$/g, function (tag) { return ""; });
+                    /* 剥离首尾定界符 */
+                    expr = expr.replace(/^\$\$?/, "").replace(/\$\$?$/, "").replace(/^\\\(/, "").replace(/\\\)$/, "").replace(/^\\\[/, "").replace(/\\\]$/, "");
+                    try {
+                        html += window.katex.renderToString(expr, { displayMode: display, throwOnError: false, output: "html" });
+                    } catch (e) {
+                        html += esc(raw); /* 渲染失败时显示原始文本 */
+                    }
+                }
+            }
+            return html;
+        }
+
         /* ===== 错因自动诊断：根据题目特征+难度+题型推测最可能的错因（10级制） ===== */
         function detectErrorCause(text, qtype, diff) {
             var t = (text || "");
@@ -7672,7 +7748,7 @@ var IndoorRouter = (function () {
             var errBox = document.getElementById("wqErrorBox");
             if (errBox) errBox.style.display = "none";
             var aiBtn = document.getElementById("wqAiBtn");
-            if (aiBtn) { aiBtn.disabled = false; aiBtn.textContent = "🤖 AI 智能识别"; }
+            if (aiBtn) { aiBtn.disabled = false; aiBtn.textContent = "🔍 分析题目"; }
             var ocrTip = document.getElementById("wqOcrTip");
             if (ocrTip) ocrTip.style.display = "none";
             modal.classList.add("show");
@@ -7839,8 +7915,8 @@ var IndoorRouter = (function () {
                 showToast("请先上传错题图片或输入题目内容"); return;
             }
             var aiBtn = document.getElementById("wqAiBtn");
-            if (aiBtn) { aiBtn.disabled = true; aiBtn.textContent = "🤖 分析中…"; }
-            /* AI 智能分析：学科/题型/难度(10级)/知识点/错因，失败则回退规则 */
+            if (aiBtn) { aiBtn.disabled = true; aiBtn.textContent = "⏳ 分析中…"; }
+            /* 智能分析：学科/题型/难度(10级)/知识点/错因，失败则回退规则 */
             aiAnalyzeQuestion(text, function (err, aiResult) {
                 if (err) {
                     /* AI 失败 → 规则兜底 */
@@ -7858,8 +7934,11 @@ var IndoorRouter = (function () {
                 }
                 _wqCritique = critiqueQuestion(text, _wqQtype);
                 _wqMastery = {};
-                renderWQTypes("wqSubjectTypes", WQ_SUBJECTS, _wqSubject, function (v) { _wqSubject = v; _wqKps = detectKnowledgePoints(text, v); renderWQRecommend(); });
-                renderWQTypes("wqQtypeTypes", WQ_QTYPES, _wqQtype, function (v) { _wqQtype = v; });
+                /* 学科、题型只读展示（不允许手动修改，分析错了后续必然错） */
+                var subjText = document.getElementById("wqSubjectText");
+                if (subjText) subjText.textContent = _wqSubject || "—";
+                var qtypeText = document.getElementById("wqQtypeText");
+                if (qtypeText) qtypeText.textContent = _wqQtype || "—";
                 /* 知识点标签 */
                 var kpBox = document.getElementById("wqKpTags");
                 if (kpBox) {
@@ -7879,7 +7958,7 @@ var IndoorRouter = (function () {
                 renderWQErrorSelector();
                 document.getElementById("wqAiResult").style.display = "block";
                 renderWQRecommend();
-                if (aiBtn) { aiBtn.disabled = false; aiBtn.textContent = "🤖 AI 智能识别"; }
+                if (aiBtn) { aiBtn.disabled = false; aiBtn.textContent = "🔍 分析题目"; }
                 _wqAiTimer = null;
             });
         }
@@ -7889,7 +7968,7 @@ var IndoorRouter = (function () {
             var box = document.getElementById("wqErrorBox");
             if (!box) return;
             var html = '<div class="wq-error-head"><span>🎯 错因诊断</span>' +
-                '<span class="wq-error-tip">AI 已为你推测，可点击切换</span></div>' +
+                '<span class="wq-error-tip">已为你推测，可点击切换</span></div>' +
                 '<div class="wq-error-list">';
             for (var i = 0; i < WQ_ERROR_TYPES.length; i++) {
                 var et = WQ_ERROR_TYPES[i];
@@ -7913,11 +7992,11 @@ var IndoorRouter = (function () {
         /* 四要素解析渲染：思路/答案/解答/易错/方法 */
         function renderSolutionParts(q) {
             var html = '<div class="wq-solution" style="display:none">';
-            if (q.idea) html += '<div class="wq-sol-idea">🧭 <b>思路分析：</b>' + esc(q.idea) + '</div>';
-            html += '<div class="wq-sol-answer"><b>答案：</b>' + esc(q.answer || "（略）") + '</div>';
-            html += '<div class="wq-sol-detail"><b>解答：</b>' + esc(q.solution || "（略）") + '</div>';
-            if (q.pitfall) html += '<div class="wq-sol-pitfall">⚠️ <b>易错点：</b>' + esc(q.pitfall) + '</div>';
-            if (q.method) html += '<div class="wq-sol-method">📌 <b>方法归纳：</b>' + esc(q.method) + '</div>';
+            if (q.idea) html += '<div class="wq-sol-idea">🧭 <b>思路分析：</b>' + renderMath(q.idea) + '</div>';
+            html += '<div class="wq-sol-answer"><b>答案：</b>' + renderMath(q.answer || "（略）") + '</div>';
+            html += '<div class="wq-sol-detail"><b>解答：</b>' + renderMath(q.solution || "（略）") + '</div>';
+            if (q.pitfall) html += '<div class="wq-sol-pitfall">⚠️ <b>易错点：</b>' + renderMath(q.pitfall) + '</div>';
+            if (q.method) html += '<div class="wq-sol-method">📌 <b>方法归纳：</b>' + renderMath(q.method) + '</div>';
             html += '</div>';
             return html;
         }
@@ -8294,46 +8373,18 @@ var IndoorRouter = (function () {
                     /* AI 讲解区：主内容。有 Provider 时异步加载，无 Provider 时提示配置 */
                     if (hasAi) {
                         dh += '<div id="wqAiExplainBox" style="margin-top:8px">' +
-                            '<div style="color:#7c3aed;font-size:13px;padding:8px 0">🤖 AI 讲解生成中…</div>' +
+                            '<div style="color:#7c3aed;font-size:13px;padding:8px 0">📖 讲解生成中…</div>' +
                             '</div>';
                     } else {
                         dh += '<div class="wq-deep-sec" style="background:#f0f9ff;border:1px solid #bae6fd;border-radius:8px;padding:10px 12px;color:#075985;font-size:13px;line-height:1.6">' +
-                            '🤖 未配置 AI 讲解模型。请安装本地 <b>Ollama</b>（系统会自动检测），' +
+                            '📖 未配置讲解模型。请安装本地 <b>Ollama</b>（系统会自动检测），' +
                             '或在 <b>开发者模式</b>（URL 加 ?dev=1）中配置 AI Provider。' +
                             '</div>';
                     }
 
                     dh += '</div></div>';
                     deepEl.innerHTML = dh;
-
-                    /* ---- AI 讲透原题：直接调用 AI 解答，让 AI 自行判断题型 ---- */
-                    if (hasAi) {
-                        try {
-                            aiExplainOriginal(origText, sub, _wqKps, function (err, best) {
-                                var box = document.getElementById("wqAiExplainBox");
-                                if (!box) return;
-                                if (err || !best) {
-                                    box.innerHTML = '<div style="color:#b91c1c;font-size:13px;padding:8px 0">⚠ AI 讲解暂时不可用（' + esc(err && err.message ? err.message : "无响应") + '）。请检查 AI Provider 配置或稍后重试。</div>';
-                                    return;
-                                }
-                                var bd = best.breakdown || {};
-                                box.innerHTML =
-                                    '<div style="background:#f5f3ff;border:1px solid #ddd6fe;border-radius:8px;padding:10px 12px">' +
-                                        '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">' +
-                                            '<b style="color:#5b21b6">🤖 AI 讲解</b>' +
-                                            '<span style="font-size:12px;color:#7c3aed">' + esc(best.provider) + ' · 评分 <b>' + (best.score || 0) + '</b>/100</span>' +
-                                        '</div>' +
-                                        '<div style="white-space:pre-wrap;font-size:13px;line-height:1.75;color:#1f2937">' + esc(best.text) + '</div>' +
-                                        '<div style="margin-top:8px;font-size:11px;color:#6b7280">评分：完整性 ' + (bd.completeness || 0) +
-                                            ' · 正确性 ' + (bd.correctness || 0) + ' · 相关性 ' + (bd.relevance || 0) +
-                                            ' · 清晰度 ' + (bd.clarity || 0) + ' · 结构 ' + (bd.structure || 0) + '</div>' +
-                                    '</div>';
-                            });
-                        } catch (e) {
-                            var box2 = document.getElementById("wqAiExplainBox");
-                            if (box2) box2.innerHTML = '<div style="color:#b91c1c;font-size:13px">⚠ AI 调用异常：' + esc(e.message) + '</div>';
-                        }
-                    }
+                    /* 讲解内容由下方一站式 aiFullPipeline 统一填充（秒级响应） */
                 } else {
                     deepEl.innerHTML = "";
                 }
@@ -8452,7 +8503,7 @@ var IndoorRouter = (function () {
                     '<div class="wq-mother-head"><span class="wq-mother-badge">母题溯源</span>' +
                     '<span class="wq-mother-tip">这是「' + esc(matchedKp || _wqKps[0] || "") + '」的原型题，掌握它即可举一反三</span>' +
                     '<span id="wqMotherSource" style="margin-left:8px;font-size:11px;color:#94a3b8">（题库）</span></div>' +
-                    '<div class="wq-mother-q">' + esc(mother.text) + '</div>';
+                    '<div class="wq-mother-q">' + renderMath(mother.text) + '</div>';
                 if (mother.ability && mother.ability.length) {
                     mhtml += '<div class="wq-rec-ability">' + mother.ability.map(function (a) { return '<span class="wq-ability-tag">' + esc(a) + '</span>'; }).join("") + '</div>';
                 }
@@ -8484,67 +8535,10 @@ var IndoorRouter = (function () {
             } else if (isNonStandard) {
                 motherEl.innerHTML = '<div class="wq-mother-empty" style="background:#fffbeb;border-color:#fde68a;color:#92400e">⚠ 未识别到学科知识点，暂不做母题溯源。请确认题目或手动选择学科后重试。</div>';
             } else {
-                motherEl.innerHTML = '<div class="wq-mother-empty">📚 母题溯源：AI 正在分析原题的原型母题…</div>';
+                motherEl.innerHTML = '<div class="wq-mother-empty">📚 母题溯源：正在分析原题的原型母题…</div>';
             }
 
-            /* ---- AI 母题溯源：异步调用，与题库版对比，输出更准的版本 ---- */
-            if (enabledProviders().length && origText.trim() && !isNonStandard) {
-                try {
-                    aiMotherTrace(origText, sub, _wqKps, function (err, aiResult) {
-                        if (err || !aiResult) return;
-                        /* 对比 AI 版与题库版 */
-                        var cmp = compareMotherTrace(aiResult, mother, origText);
-                        var sourceEl = document.getElementById("wqMotherSource");
-                        var kpBox = document.getElementById("wqMotherKpExplain");
-                        var kpText = document.getElementById("wqMotherKpText");
-
-                        /* 展示讲透母知识点（AI 的 kpExplain 更深入） */
-                        if (aiResult.kpExplain && aiResult.kpExplain.trim().length > 20 && kpBox && kpText) {
-                            kpText.textContent = aiResult.kpExplain;
-                            kpBox.style.display = "block";
-                        }
-
-                        if (cmp.winner === "ai" && aiResult.motherText) {
-                            /* AI 版更准 → 展示 AI 母题 */
-                            var card = motherEl.querySelector(".wq-mother-card");
-                            if (!card) {
-                                /* 原题库无母题，从零渲染 AI 母题卡片 */
-                                motherEl.innerHTML = '<div class="wq-mother-card">' +
-                                    '<div class="wq-mother-head"><span class="wq-mother-badge">母题溯源</span>' +
-                                    '<span class="wq-mother-tip">AI 为「' + esc(matchedKp || _wqKps[0] || "") + '」找到的原型母题</span>' +
-                                    '<span id="wqMotherSource" style="margin-left:8px;font-size:11px;color:#94a3b8">（AI 溯源 · 评分 ' + cmp.aiScore.toFixed(2) + '）</span></div>' +
-                                    '<div class="wq-mother-q">' + esc(aiResult.motherText) + '</div>' +
-                                    (aiResult.motherAnswer ? '<div class="wq-solution" style="display:block"><div class="wq-sol-answer"><b>答案：</b>' + esc(aiResult.motherAnswer) + '</div></div>' : '') +
-                                    '<div id="wqMotherKpExplain" style="margin-top:12px;padding:10px 12px;background:#f0f9ff;border:1px solid #bae6fd;border-radius:8px">' +
-                                        '<div style="font-weight:bold;color:#0369a1;margin-bottom:6px">🧠 讲透母知识点</div>' +
-                                        '<div id="wqMotherKpText" style="font-size:13px;line-height:1.7;color:#0c4a6e;white-space:pre-wrap">' + esc(aiResult.kpExplain || "") + '</div>' +
-                                    '</div>' +
-                                    (aiResult.relation ? '<div style="margin-top:10px;padding:8px 10px;background:#fef3c7;border-radius:6px;font-size:12px;color:#92400e;line-height:1.6">🔗 <b>演变关系：</b>' + esc(aiResult.relation) + '</div>' : '') +
-                                    '</div>';
-                            } else {
-                                /* 已有题库母题卡片，替换为 AI 版 */
-                                var qEl = motherEl.querySelector(".wq-mother-q");
-                                if (qEl) qEl.textContent = aiResult.motherText;
-                                if (sourceEl) sourceEl.textContent = "（AI 溯源 · 评分 " + cmp.aiScore.toFixed(2) + "）";
-                                if (aiResult.motherAnswer) {
-                                    var solEl = motherEl.querySelector(".wq-sol-answer");
-                                    if (solEl) solEl.innerHTML = '<b>答案：</b>' + esc(aiResult.motherAnswer);
-                                }
-                                if (aiResult.relation) {
-                                    var relDiv = document.createElement("div");
-                                    relDiv.style.cssText = "margin-top:10px;padding:8px 10px;background:#fef3c7;border-radius:6px;font-size:12px;color:#92400e;line-height:1.6";
-                                    relDiv.innerHTML = "🔗 <b>演变关系：</b>" + esc(aiResult.relation);
-                                    card.appendChild(relDiv);
-                                }
-                            }
-                        } else if (cmp.winner === "bank" && sourceEl) {
-                            sourceEl.textContent = "（题库 · 评分 " + cmp.bankScore.toFixed(2) + "）";
-                        } else if (sourceEl && aiResult.motherText) {
-                            sourceEl.textContent = "（题库，AI 评分 " + cmp.aiScore.toFixed(2) + "）";
-                        }
-                    });
-                } catch (e) { /* AI 异常不影响已有母题展示 */ }
-            }
+            /* 母题溯源的 AI 内容由下方一站式 aiFullPipeline 统一填充 */
         }
 
             /* 渲染分层推荐（10级合并为 4 档） */
@@ -8581,10 +8575,10 @@ var IndoorRouter = (function () {
                     /* 知识迁移题：与原题文本相似度低（不是换数字的同类题）。
                      * 由于推荐题已限定在匹配知识点节点内，天然同知识点，只需判断非雷同即可。 */
                     var isTransfer = textSim(origText, q.text) < 0.4;
-                    var genBadge = (q._generated || q._aiGenerated) ? '<span class="wq-transfer-tag" style="background:#7c3aed" title="' + esc(q.source || "AI生成") + '">🤖 AI生成</span>' : '';
+                    var genBadge = (q._generated || q._aiGenerated) ? '<span class="wq-transfer-tag" style="background:#7c3aed" title="' + esc(q.source || "智能生成") + '">✨ 智能生成</span>' : '';
                     var layerBadge = (q._layer) ? '<span class="wq-transfer-tag" style="background:#059669" title="分层推荐">' + esc(q._layer) + '</span>' : '';
                     html += '<div class="wq-rec-card' + (mastered === true ? ' mastered' : '') + (mastered === false ? ' not-mastered' : '') + '">' +
-                        '<div class="wq-rec-q">' + esc(q.text) +
+                        '<div class="wq-rec-q">' + renderMath(q.text) +
                             '<span class="wq-rec-diff">' + wqDiffBar(q.diff) + '</span>' +
                             (isTransfer ? '<span class="wq-transfer-tag">🔀 知识迁移</span>' : '') + genBadge + layerBadge +
                         '</div>';
@@ -8609,66 +8603,110 @@ var IndoorRouter = (function () {
             }
             paintRecs(recs);
 
-            /* ---- AI 赋能推题：并行调用 变式题生成 + 分层推荐，合并重渲染 ---- */
+            /* ---- 一站式智能分析：单次调用同时生成 讲解 + 母题溯源 + 推荐题（秒级响应） ---- */
             if (enabledProviders().length && origText.trim() && !isNonStandard) {
-                var _aiPending = 2;
-                var _aiAll = [];
-                function _mergeAndPaint() {
-                    if (_aiPending > 0) return;
-                    if (!_aiAll.length) return;
-                    var merged = recs.slice();
-                    for (var ai = 0; ai < _aiAll.length; ai++) {
-                        var dup = false;
-                        for (var mi = 0; mi < merged.length; mi++) {
-                            if (textSim(_aiAll[ai].text, merged[mi].text) > 0.5) { dup = true; break; }
-                        }
-                        if (!dup) merged.push(_aiAll[ai]);
-                    }
-                    merged.sort(function (a, b) {
-                        var aSim = textSim(origText, a.text || "");
-                        var bSim = textSim(origText, b.text || "");
-                        if (Math.abs(aSim - bSim) > 0.05) return bSim - aSim;
-                        var aClose = Math.abs((a.diff || 1) - targetDiff);
-                        var bClose = Math.abs((b.diff || 1) - targetDiff);
-                        return aClose - bClose;
-                    });
-                    paintRecs(merged.slice(0, 8));
-                }
                 try {
-                    /* ① 变式题生成（难度递进） */
-                    aiRecommendQuestions(origText, sub, _wqKps, targetDiff, function (err, aiRecs) {
-                        _aiPending--;
-                        if (!err && aiRecs && aiRecs.length) {
-                            for (var i = 0; i < aiRecs.length; i++) _aiAll.push(aiRecs[i]);
+                    aiFullPipeline(origText, sub, _wqKps, origDiff, function (err, result) {
+                        if (err || !result) return;
+                        /* ① 填充原题讲解 */
+                        var explBox = document.getElementById("wqAiExplainBox");
+                        if (explBox) {
+                            explBox.innerHTML = '<div style="background:#f5f3ff;border:1px solid #ddd6fe;border-radius:8px;padding:10px 12px;margin-top:8px">' +
+                                '<b style="color:#6d28d9">📖 讲解</b>' +
+                                '<div style="white-space:pre-wrap;font-size:13px;line-height:1.7;color:#1e293b;margin-top:6px">' + renderMath(result.explain || "") + '</div>' +
+                                '</div>';
                         }
-                        _mergeAndPaint();
-                    });
-                    /* ② 分层推荐（基础/变式/拔高，覆盖不同难度层级） */
-                    aiLayeredRecommend(origText, sub, _wqKps, origDiff, function (err, layered) {
-                        _aiPending--;
-                        if (!err && layered && layered.length) {
-                            for (var j = 0; j < layered.length; j++) {
-                                var lq = layered[j];
-                                if (!lq.text) continue;
-                                /* 校验后加入 */
-                                var v = WQ_PIPELINE_B.verifyQuestion({
-                                    text: lq.text, answer: lq.answer || "（AI生成）",
-                                    source: "AI分层-" + (lq.layer || ""), source_url: "", verify_status: "pending"
-                                });
-                                if (v.ok) {
-                                    _aiAll.push({
-                                        text: lq.text, answer: lq.answer || "", idea: lq.idea || "",
-                                        solution: lq.solution || "", pitfall: "", method: "",
-                                        diff: lq.diff || origDiff, kp: _wqKps, ability: [],
-                                        source: "AI分层-" + (lq.layer || ""), verify_status: "passed",
-                                        _aiGenerated: true, _layer: lq.layer || ""
-                                    });
+                        /* ② 填充母题溯源（对比题库母题，择优展示） */
+                        var mEl = document.getElementById("wqMother");
+                        if (mEl && result.mother && result.mother.text) {
+                            var aiMother = {
+                                text: result.mother.text,
+                                answer: result.mother.answer || "",
+                                kpExplain: result.mother.kpExplain || "",
+                                relation: result.mother.relation || ""
+                            };
+                            var cmp = compareMotherTrace(
+                                { motherText: aiMother.text, motherAnswer: aiMother.answer, kpExplain: aiMother.kpExplain },
+                                mother, origText
+                            );
+                            var winner = cmp.winner;
+                            if (!mother) winner = "ai";
+                            if (winner === "ai") {
+                                var mh = '<div class="wq-mother-card">' +
+                                    '<div class="wq-mother-head"><span class="wq-mother-badge">母题溯源</span>' +
+                                    '<span class="wq-mother-tip">追溯到「' + esc(_wqKps[0] || matchedKp || "该知识点") + '」的原型题，掌握它即可举一反三</span>' +
+                                    '<span style="margin-left:8px;font-size:11px;color:#94a3b8">（智能溯源）</span></div>' +
+                                    '<div class="wq-mother-q">' + renderMath(aiMother.text) + '</div>' +
+                                    '<div class="wq-solution" style="display:none">' +
+                                        '<div class="wq-sol-answer"><b>答案：</b>' + renderMath(aiMother.answer) + '</div>' +
+                                    '</div>' +
+                                    '<button class="wq-toggle-sol" onclick="var s=this.previousElementSibling;s.style.display=s.style.display===\'block\'?\'none\':\'block\';this.textContent=s.style.display===\'block\'?\'▼ 收起\':\'▶ 查看答案\'">▶ 查看答案</button>';
+                                if (aiMother.kpExplain) {
+                                    mh += '<div style="margin-top:12px;padding:10px 12px;background:#f0f9ff;border:1px solid #bae6fd;border-radius:8px">' +
+                                        '<div style="font-weight:bold;color:#0369a1;margin-bottom:6px">🧠 讲透母知识点</div>' +
+                                        '<div style="font-size:13px;line-height:1.7;color:#0c4a6e;white-space:pre-wrap">' + renderMath(aiMother.kpExplain) + '</div>' +
+                                    '</div>';
+                                }
+                                if (aiMother.relation) {
+                                    mh += '<div style="margin-top:10px;padding:10px 12px;background:#fefce8;border:1px solid #fde68a;border-radius:8px">' +
+                                        '<div style="font-weight:bold;color:#92400e;margin-bottom:6px">🔗 演变关系</div>' +
+                                        '<div style="font-size:13px;line-height:1.7;color:#78350f;white-space:pre-wrap">' + esc(aiMother.relation) + '</div>' +
+                                    '</div>';
+                                }
+                                mh += '</div>';
+                                mEl.innerHTML = mh;
+                            } else if (winner === "bank" && aiMother.kpExplain) {
+                                /* 题库母题胜出，但补充 AI 的知识点讲解与演变关系 */
+                                var kpBox = document.getElementById("wqMotherKpExplain");
+                                var kpText = document.getElementById("wqMotherKpText");
+                                if (kpBox && kpText) {
+                                    kpText.innerHTML = renderMath(aiMother.kpExplain);
+                                    kpBox.style.display = "block";
+                                }
+                                var srcEl = document.getElementById("wqMotherSource");
+                                if (srcEl) srcEl.textContent = "（题库 + 智能溯源）";
+                                if (aiMother.relation) {
+                                    var relBox = document.createElement("div");
+                                    relBox.style.cssText = "margin-top:10px;padding:10px 12px;background:#fefce8;border:1px solid #fde68a;border-radius:8px";
+                                    relBox.innerHTML = '<div style="font-weight:bold;color:#92400e;margin-bottom:6px">🔗 演变关系</div>' +
+                                        '<div style="font-size:13px;line-height:1.7;color:#78350f;white-space:pre-wrap">' + esc(aiMother.relation) + '</div>';
+                                    mEl.querySelector(".wq-mother-card").appendChild(relBox);
                                 }
                             }
                         }
-                        _mergeAndPaint();
+                        /* ③ 填充推荐题（AI 生成为主，题库版作补充，去重合并） */
+                        if (result.recs && result.recs.length) {
+                            var aiRecs = [];
+                            for (var ri = 0; ri < result.recs.length; ri++) {
+                                var rq = result.recs[ri];
+                                if (!rq.text) continue;
+                                aiRecs.push({
+                                    text: rq.text, answer: rq.answer || "", idea: "", solution: rq.solution || "",
+                                    pitfall: "", method: "", diff: rq.diff || origDiff, kp: _wqKps, ability: [],
+                                    source: "智能生成", verify_status: "passed",
+                                    _aiGenerated: true, _layer: rq.layer || ""
+                                });
+                            }
+                            /* AI 题在前（主力），题库题在后（补充），去重 */
+                            var merged = aiRecs.slice();
+                            for (var br = 0; br < recs.length; br++) {
+                                var dup = false;
+                                for (var mr = 0; mr < merged.length; mr++) {
+                                    if (textSim(recs[br].text, merged[mr].text) > 0.5) { dup = true; break; }
+                                }
+                                if (!dup) merged.push(recs[br]);
+                            }
+                            /* 按与目标难度的接近程度排序 */
+                            merged.sort(function (a, b) {
+                                var aClose = Math.abs((a.diff || 1) - targetDiff);
+                                var bClose = Math.abs((b.diff || 1) - targetDiff);
+                                if (aClose !== bClose) return aClose - bClose;
+                                return 0;
+                            });
+                            paintRecs(merged.slice(0, 8));
+                        }
                     });
-                } catch (e) { _aiPending = 0; /* AI 异常不影响已有推荐 */ }
+                } catch (e) { /* 异常不影响已有展示 */ }
             }
 
             /* 举一反三提示 —— 非标准题不展示错因/路径提示 */
@@ -8779,12 +8817,12 @@ var IndoorRouter = (function () {
             var initFinal = initProg * w.program + userScore * w.user;
             if (isGood) {
                 if (initFinal >= 0.6 && targetQ) {
-                    showToast("👍 好问题（规则评分" + initFinal.toFixed(2) + "），正在用 AI 复核权威性…");
+                    showToast("👍 好问题（规则评分" + initFinal.toFixed(2) + "），正在用 智能复核权威性…");
                 } else {
-                    showToast("👍 已记录为好问题（规则评分" + initFinal.toFixed(2) + "），AI 复核中…");
+                    showToast("👍 已记录为好问题（规则评分" + initFinal.toFixed(2) + "），智能复核中…");
                 }
             } else {
-                showToast("👎 已记录为坏问题（规则评分" + initFinal.toFixed(2) + "），AI 复核中…");
+                showToast("👎 已记录为坏问题（规则评分" + initFinal.toFixed(2) + "），智能复核中…");
             }
 
             /* AI 权威性评分（异步），返回后用最终评分决定是否入库 */
@@ -8809,15 +8847,15 @@ var IndoorRouter = (function () {
                                 var stored = WQ_PIPELINE_B.storeQuestion(targetQ, sub, kp);
                                 WQ_PIPELINE_B.persistBank();
                                 if (stored) {
-                                    showToast("✅ AI 复核通过（综合" + finalScore.toFixed(2) + "），已加入题库！");
+                                    showToast("✅ 智能复核通过（综合" + finalScore.toFixed(2) + "），已加入题库！");
                                 } else {
-                                    showToast("👍 AI 复核通过（综合" + finalScore.toFixed(2) + "），题库中已有类似题");
+                                    showToast("👍 智能复核通过（综合" + finalScore.toFixed(2) + "），题库中已有类似题");
                                 }
                             } else {
-                                showToast("👍 AI 复核后综合评分" + finalScore.toFixed(2) + "，未达入库阈值(0.6)，已记录偏好");
+                                showToast("👍 智能复核后综合评分" + finalScore.toFixed(2) + "，未达入库阈值(0.6)，已记录偏好");
                             }
                         } else {
-                            showToast("👎 AI 复核完成（综合" + finalScore.toFixed(2) + "），后续减少类似推荐");
+                            showToast("👎 智能复核完成（综合" + finalScore.toFixed(2) + "），后续减少类似推荐");
                         }
                         renderWQRecommend();
                     });
@@ -16249,19 +16287,19 @@ body.fire-mode #fireOverlay{display:flex}
     <!-- 题目文本 -->
     <textarea class="fb-text" id="wqText" placeholder="拍照后自动识别题目文字，也可手动输入或粘贴…"></textarea>
 
-    <!-- AI 识别结果 -->
+    <!-- 识别结果 -->
     <div class="wq-ai-result" id="wqAiResult" style="display:none">
       <div class="wq-ai-head">
-        <span class="wq-ai-title">🤖 AI 智能分析</span>
-        <button type="button" id="wqAiRetry" class="wq-ai-retry">重新识别</button>
+        <span class="wq-ai-title">🔍 智能分析</span>
+        <button type="button" id="wqAiRetry" class="wq-ai-retry">🔄 重新分析</button>
       </div>
       <div class="wq-ai-row">
         <span class="wq-ai-label">学科：</span>
-        <div class="fb-types wq-subject-types" id="wqSubjectTypes"></div>
+        <span class="wq-ai-readonly" id="wqSubjectText"></span>
       </div>
       <div class="wq-ai-row">
         <span class="wq-ai-label">题型：</span>
-        <div class="fb-types wq-qtype-types" id="wqQtypeTypes"></div>
+        <span class="wq-ai-readonly" id="wqQtypeText"></span>
       </div>
       <div class="wq-ai-row">
         <span class="wq-ai-label">知识点：</span>
@@ -16278,7 +16316,7 @@ body.fire-mode #fireOverlay{display:flex}
 
     <!-- 操作按钮 -->
     <div class="wq-actions">
-      <button type="button" class="wq-btn wq-btn-ai" id="wqAiBtn">🤖 AI 智能识别</button>
+      <button type="button" class="wq-btn wq-btn-ai" id="wqAiBtn">🔍 分析题目</button>
       <button type="button" class="wq-btn wq-btn-expand" id="wqExpandBankBtn" title="网站自动扩展题库" style="display:none">🔄 扩展题库</button>
     </div>
     <div class="wq-bank-status" id="wqBankStatus">📚 题库加载中…</div>
@@ -16354,7 +16392,7 @@ body.fire-mode #fireOverlay{display:flex}
     <div id="wqAiCfgBody" style="flex:1;overflow-y:auto;padding:16px"></div>
     <div style="padding:12px 16px;border-top:1px solid #e5e7eb;display:flex;justify-content:space-between;background:#f9fafb">
       <label style="font-size:13px;display:flex;align-items:center;gap:6px">
-        <input type="checkbox" id="wqAiEnabled"> 启用 AI 赋能
+        <input type="checkbox" id="wqAiEnabled"> 启用智能赋能
       </label>
       <div>
         <button onclick="saveWQAiConfig()" style="background:#5b21b6;color:#fff;border:none;padding:6px 16px;border-radius:6px;cursor:pointer">💾 保存</button>
