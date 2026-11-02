@@ -18,11 +18,11 @@
 const TENCENT_ENDPOINT = "https://tokenhub.tencentmaas.com/v1/chat/completions";
 const API_KEY = "sk-bHsivwabq4VodIU1tXxAjWUOOEkrlA65UFoRSrJ7C2fWPPrW";
 
-/* 模型路由：按任务选最合适的模型 */
+/* 模型路由：用 Cloudflare Workers AI（内网调用，避免跨境超时） */
 const MODEL = {
-  generate: "kimi-k3.1-pro",   // 生成候选题
-  score:    "deepseek-v4.1-flash", // 权威性评分
-  analyze:  "deepseek-v4.1-flash"  // 学科/知识点分析
+  generate: "@cf/meta/llama-3.1-70b-instruct",      // 生成候选题（非推理模型，JSON 输出稳定）
+  score:    "@cf/swiss-ai/apertus-v1.5-8b",           // 权威性评分（多语言，支持函数调用）
+  analyze:  "@cf/swiss-ai/apertus-v1.5-8b"            // 学科/知识点分析
 };
 
 /* 入库阈值：综合评分 >= 此值才入库（高级题门槛） */
@@ -62,36 +62,62 @@ function textSim(a, b) {
   return inter / Math.max(setA.size, setB.size, 1);
 }
 
-async function callAI(messages, model) {
-  var resp = await fetch(TENCENT_ENDPOINT, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "Authorization": "Bearer " + API_KEY
-    },
-    body: JSON.stringify({ model: model, messages: messages })
-  });
-  if (!resp.ok) throw new Error("AI HTTP " + resp.status);
-  var data = await resp.json();
-  var text = data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content;
+/* Cloudflare Workers AI 调用（内网，无跨境超时） */
+async function callAI(messages, model, env) {
+  var resp = await env.AI.run(model, { messages: messages, max_tokens: 8192 });
+  var text = resp && resp.response;
   if (!text) throw new Error("AI empty response");
   return text;
 }
 
-function extractJSON(text) {
+/* 旧版外部 API 调用（保留备用，当前不使用） */
+async function callAI_legacy(messages, model) {
+  var controller = new AbortController();
+  var timer = setTimeout(function () { controller.abort(); }, 90000); /* 90 秒超时，避免 CF 524 */
   try {
-    var m = text.match(/\{[\s\S]*\}/);
+    var resp = await fetch(TENCENT_ENDPOINT, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": "Bearer " + API_KEY
+      },
+      body: JSON.stringify({ model: model, messages: messages }),
+      signal: controller.signal
+    });
+    if (!resp.ok) throw new Error("AI HTTP " + resp.status);
+    var data = await resp.json();
+    var text = data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content;
+    if (!text) throw new Error("AI empty response");
+    return text;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/* 从模型输出中提取 JSON（兼容 deepseek-r1 的 <think> 推理块与 markdown 代码围栏） */
+function extractJSON(text) {
+  if (!text) return null;
+  /* 1. 去掉 deepseek-r1 等推理模型的 <think>...</think> 块 */
+  var cleaned = text.replace(/<think>[\s\S]*?<\/think>/g, "").trim();
+  /* 2. 优先从 markdown 代码围栏 ```json ... ``` 中提取 */
+  var fence = cleaned.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
+  if (fence) {
+    try { return JSON.parse(fence[1].trim()); } catch (e) {}
+  }
+  /* 3. 兜底：贪心匹配最外层 { } 或 [ ] */
+  try {
+    var m = cleaned.match(/\{[\s\S]*\}/);
     if (m) return JSON.parse(m[0]);
   } catch (e) {}
   try {
-    var m2 = text.match(/\[[\s\S]*\]/);
+    var m2 = cleaned.match(/\[[\s\S]*\]/);
     if (m2) return JSON.parse(m2[0]);
   } catch (e) {}
   return null;
 }
 
 /* ============ AI 生成候选题目（仅高级难题 L7-L10） ============ */
-async function generateCandidates(subject, kp, count) {
+async function generateCandidates(subject, kp, count, env, log) {
   var sysPrompt = "你是一位" + subject + "资深命题专家，擅长命制高考压轴题、竞赛题与深度综合探究题。" +
     "请围绕知识点「" + kp + "」生成 " + count + " 道【高级难题】，严格要求：" +
     "①难度必须在 L7-L10 之间（L7=综合建模，L8=思想方法，L9=拓展探究，L10=原创研究），严禁出简单识记/直接套用题；" +
@@ -103,19 +129,27 @@ async function generateCandidates(subject, kp, count) {
     { role: "system", content: sysPrompt },
     { role: "user", content: "知识点：" + kp + "\n学科：" + subject }
   ];
-  var text = await callAI(messages, MODEL.generate);
+  var text = await callAI(messages, MODEL.generate, env);
   var arr = extractJSON(text);
-  if (!Array.isArray(arr)) return [];
-  return arr.filter(function (q) {
+  if (!Array.isArray(arr)) {
+    if (log) {
+      var preview = (text || "").replace(/[^a-zA-Z0-9\u4e00-\u9fa5\[\]\{\}\"\:\,\.\?\! ]/g, " ").substring(0, 200);
+      log.push("  [debug] AI 响应长度 " + (text ? text.length : 0) + " 预览: " + preview);
+    }
+    return [];
+  }
+  var kept = arr.filter(function (q) {
     if (!q || !q.text || q.text.length < 10) return false;
     /* 过滤掉低难度题 */
     var d = parseInt(q.diff) || 0;
     return d >= MIN_DIFF;
   });
+  if (kept.length === 0 && log) log.push("  [debug] 解析到 " + arr.length + " 道，过滤后剩 0 道（可能难度 < L7）");
+  return kept;
 }
 
 /* ============ AI 权威性评分 ============ */
-async function scoreQuestion(q, subject, kp) {
+async function scoreQuestion(q, subject, kp, env) {
   var sysPrompt = "你是一位严谨的教研审核员。请对这道题的质量与权威性打分，严格按JSON返回：" +
     '{\"authority\":0-1,\"answerable\":0-1,\"relevant\":0-1,\"clarity\":0-1}' +
     "评分标准：authority=题目是否真实可信（非编造/非广告/非明显错误）；answerable=答案是否可验证且合理；relevant=是否与知识点「" + kp + "」匹配；clarity=题面表述是否清晰无歧义。";
@@ -129,7 +163,7 @@ async function scoreQuestion(q, subject, kp) {
     { role: "system", content: sysPrompt },
     { role: "user", content: qInfo }
   ];
-  var text = await callAI(messages, MODEL.score);
+  var text = await callAI(messages, MODEL.score, env);
   var result = extractJSON(text);
   if (!result) return { total: 0, breakdown: {} };
   var w = { ai: 0.4, answer: 0.3, source: 0.2, dedup: 0.1 };
@@ -210,7 +244,7 @@ function isDuplicate(bank, subject, kp, text) {
 }
 
 /* ============ 主更新流程 ============ */
-async function runUpdate(KV) {
+async function runUpdate(KV, env) {
   var log = [];
   var bank = await loadBank(KV);
   var lacking = findLackingKps(bank);
@@ -231,7 +265,7 @@ async function runUpdate(KV) {
     log.push("补充「" + t.subject + " / " + t.kp + "」（当前 " + t.count + " 题）");
 
     try {
-      var candidates = await generateCandidates(t.subject, t.kp, 3);
+      var candidates = await generateCandidates(t.subject, t.kp, 3, env, log);
       log.push("  生成候选 " + candidates.length + " 道");
 
       for (var ci = 0; ci < candidates.length && stored < MAX_STORE_PER_RUN; ci++) {
@@ -252,7 +286,7 @@ async function runUpdate(KV) {
         }
 
         /* AI 权威性评分 */
-        var score = await scoreQuestion(q, t.subject, t.kp);
+        var score = await scoreQuestion(q, t.subject, t.kp, env);
         if (score.total < STORE_THRESHOLD) {
           log.push("  候选" + (ci + 1) + " 评分 " + score.total.toFixed(2) + " < " + STORE_THRESHOLD + "，淘汰");
           continue;
@@ -297,7 +331,21 @@ async function runUpdate(KV) {
 export default {
   /* Cron 触发器：每 2 小时自主扩展题库 */
   async scheduled(event, env, ctx) {
-    ctx.waitUntil(runUpdate(env.WQ_BANK_KV));
+    ctx.waitUntil((async function () {
+      try {
+        await runUpdate(env.WQ_BANK_KV, env);
+      } catch (e) {
+        /* 即使出错也写入运行记录，便于排查 */
+        try {
+          await pushCronLog(env.WQ_BANK_KV, {
+            time: new Date().toISOString(),
+            stored: 0,
+            attempted: 0,
+            log: ["❌ 运行异常：" + (e && e.message ? e.message : String(e))]
+          });
+        } catch (_) { /* KV 写入也失败则忽略 */ }
+      }
+    })());
   },
 
   /* HTTP 接口：供前端读取共享题库 */
@@ -337,8 +385,19 @@ export default {
 
     if (path === "/bank/run" || path === "/api/bank/run") {
       /* 手动触发更新（调试用） */
-      var result = await runUpdate(env.WQ_BANK_KV);
+      var result = await runUpdate(env.WQ_BANK_KV, env);
       return new Response(JSON.stringify({ ok: true, result: result }), { headers: corsHeaders });
+    }
+
+    if (path === "/bank/test-ai") {
+      /* 测试 AI 端点连通性和耗时 */
+      var t0 = Date.now();
+      try {
+        var txt = await callAI([{ role: "user", content: "回复OK" }], MODEL.generate, env);
+        return new Response(JSON.stringify({ ok: true, elapsedMs: Date.now() - t0, preview: txt.slice(0, 100) }), { headers: corsHeaders });
+      } catch (e) {
+        return new Response(JSON.stringify({ ok: false, elapsedMs: Date.now() - t0, error: e.message }), { headers: corsHeaders });
+      }
     }
 
     return new Response(JSON.stringify({ error: "not found", paths: ["/bank", "/bank/stats", "/bank/run"] }), {

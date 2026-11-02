@@ -8,7 +8,7 @@ name = "hnu-wq-bank-updater"
 main = "worker.js"
 compatibility_date = "2024-09-01"
 
-# Cron 触发器：每 2 小时执行一次（UTC 时间，0,2,4,...,22 点）
+# Cron 触发器：每 2 小时执行一次
 [triggers]
 crons = ["0 */2 * * *"]
 
@@ -16,6 +16,10 @@ crons = ["0 */2 * * *"]
 [[kv_namespaces]]
 binding = "WQ_BANK_KV"
 id = "5416e48878264be68ef3abe3095c7e55"
+
+# Cloudflare Workers AI（内网调用，避免跨境超时）
+[ai]
+binding = "AI"
 
 # 路由（可选）：绑定到自定义域名或 workers.dev 子域
 # routes = ["hnu-wq-bank-updater.<your-subdomain>.workers.dev/*"]

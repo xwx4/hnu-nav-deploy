@@ -1395,7 +1395,7 @@ body.no-motion .layer-base.plan-loading::after { animation: none; }
     letter-spacing: -.3px;
 }
 .fb-list-title {
-    background: linear-gradient(135deg, #4f46e5, #7c3aed);
+    background: linear-gradient(135deg, #6366f1, #8b5cf6);
     -webkit-background-clip: text; -webkit-text-fill-color: transparent;
     background-clip: text;
 }
@@ -1458,7 +1458,7 @@ body.no-motion .layer-base.plan-loading::after { animation: none; }
 }
 .fb-item::before {
     content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 4px;
-    background: linear-gradient(180deg, #6366f1, #8b5cf6);
+    background: linear-gradient(180deg, #818cf8, #c4b5fd);
 }
 .fb-item:hover { transform: translateY(-2px); box-shadow: 0 8px 24px rgba(99,102,241,.12); border-color: #c7d2fe; }
 .fb-item-head { display: flex; justify-content: space-between; margin-bottom: 4px; }
@@ -1513,7 +1513,7 @@ body.no-motion .layer-base.plan-loading::after { animation: none; }
     cursor: pointer; font-weight: 600; transition: background .15s;
 }
 .wq-btn-ai { background: #8b5cf6; color: #fff; }
-.wq-btn-ai:hover { background: #7c3aed; }
+.wq-btn-ai:hover { background: #8b5cf6; }
 .wq-btn-expand { background: #0ea5e9; color: #fff; flex: 0 0 auto; padding: 10px 14px; }
 .wq-btn-expand:hover { background: #0284c7; }
 .wq-bank-status { font-size: 12px; color: #64748b; margin-bottom: 12px; padding: 6px 10px; background: #f1f5f9; border-radius: 6px; }
@@ -1647,9 +1647,9 @@ body.no-motion .layer-base.plan-loading::after { animation: none; }
 
 /* ===== 变式题 ===== */
 .wq-variants { margin-top: 10px; border-top: 1px dashed #e9d5ff; padding-top: 8px; }
-.wq-variants-title { font-size: 12px; font-weight: 600; color: #7c3aed; margin-bottom: 6px; }
+.wq-variants-title { font-size: 12px; font-weight: 600; color: #8b5cf6; margin-bottom: 6px; }
 .wq-variant-card { background: #faf5ff; border-radius: 6px; padding: 8px 10px; margin-bottom: 6px; }
-.wq-variant-type { display: inline-block; font-size: 10px; background: #7c3aed; color: #fff; padding: 1px 8px; border-radius: 8px; margin-bottom: 4px; }
+.wq-variant-type { display: inline-block; font-size: 10px; background: #8b5cf6; color: #fff; padding: 1px 8px; border-radius: 8px; margin-bottom: 4px; }
 .wq-variant-q { font-size: 12px; color: #334155; line-height: 1.5; }
 
 /* ===== 四要素解析 ===== */
@@ -1676,12 +1676,12 @@ body.no-motion .layer-base.plan-loading::after { animation: none; }
 .wq-layer-focus-tag { font-size: 10px; background: #6366f1; color: #fff; padding: 1px 8px; border-radius: 8px; }
 
 /* ===== 错题列表：错因标签 + 弱项分析 ===== */
-.wq-item-error { display: inline-block; font-size: 10px; background: #f5f3ff; color: #7c3aed; padding: 1px 7px; border-radius: 8px; margin-left: 6px; }
+.wq-item-error { display: inline-block; font-size: 10px; background: #f5f3ff; color: #8b5cf6; padding: 1px 7px; border-radius: 8px; margin-left: 6px; }
 .wq-weak-card { background: #fffbeb; border: 1px solid #fde68a; border-radius: 10px; padding: 10px 12px; margin: 8px 0; }
 .wq-weak-title { font-size: 12px; font-weight: 600; color: #92400e; margin: 4px 0; }
 .wq-weak-tags { display: flex; flex-wrap: wrap; gap: 6px; }
 .wq-weak-chip { font-size: 11px; padding: 2px 10px; border-radius: 10px; }
-.wq-weak-chip.err { background: #f5f3ff; color: #7c3aed; }
+.wq-weak-chip.err { background: #f5f3ff; color: #8b5cf6; }
 .wq-weak-chip.kp { background: #ecfdf5; color: #047857; }
 
 </style>
@@ -7751,7 +7751,7 @@ var IndoorRouter = (function () {
         /* ---- 错题本自定义分类 ---- */
         var WQ_CAT_KEY = "wq_categories";
         var _wqActiveCat = "all";  /* "all" | "none" | categoryId */
-        var WQ_CAT_COLORS = ["#7c3aed", "#2563eb", "#0891b2", "#059669", "#ea580c", "#dc2626", "#db2777", "#4f46e5", "#0d9488", "#ca8a04"];
+        var WQ_CAT_COLORS = ["#818cf8", "#60a5fa", "#38bdf8", "#34d399", "#fbbf24", "#fb923c", "#f472b6", "#a78bfa", "#2dd4bf", "#facc15"];
         function getWQCats() {
             try { return JSON.parse(localStorage.getItem(WQ_CAT_KEY) || "[]"); } catch (e) { return []; }
         }
@@ -7785,6 +7785,34 @@ var IndoorRouter = (function () {
             var r = list.filter(function (x) { return x.id === itemId; })[0];
             if (r) { r.categoryId = catId || null; saveWQ(list); }
         }
+        /* 自定义输入弹窗：替代浏览器原生 prompt（QQ 内嵌浏览器不支持 prompt） */
+        function wqPrompt(title, defaultVal, onOk) {
+            var mask = document.createElement("div");
+            mask.style.cssText = "position:fixed;inset:0;background:rgba(15,23,42,.55);z-index:100000;display:flex;align-items:center;justify-content:center;padding:20px";
+            var box = document.createElement("div");
+            box.style.cssText = "background:#fff;border-radius:16px;padding:20px;width:100%;max-width:360px;box-shadow:0 12px 40px rgba(0,0,0,.3)";
+            box.innerHTML = '<div style="font-size:16px;font-weight:700;color:#1e293b;margin-bottom:12px">' + title + '</div>' +
+                '<input type="text" id="wqPromptInput" style="width:100%;padding:12px 14px;border:1px solid #e2e8f0;border-radius:10px;font-size:16px;outline:none;box-sizing:border-box" value="' + esc(defaultVal || "") + '">' +
+                '<div style="display:flex;gap:10px;margin-top:16px">' +
+                '<button id="wqPromptCancel" style="flex:1;padding:11px;background:#f1f5f9;color:#475569;border:none;border-radius:10px;font-size:15px;cursor:pointer">取消</button>' +
+                '<button id="wqPromptOk" style="flex:1;padding:11px;background:#8b5cf6;color:#fff;border:none;border-radius:10px;font-size:15px;cursor:pointer">确定</button>' +
+                '</div>';
+            mask.appendChild(box);
+            document.body.appendChild(mask);
+            var input = box.querySelector("#wqPromptInput");
+            setTimeout(function () { input.focus(); input.select(); }, 50);
+            function close() { mask.remove(); }
+            box.querySelector("#wqPromptCancel").onclick = close;
+            box.querySelector("#wqPromptOk").onclick = function () {
+                var val = input.value.trim();
+                close();
+                if (onOk) onOk(val);
+            };
+            input.addEventListener("keydown", function (e) {
+                if (e.key === "Enter") { e.preventDefault(); box.querySelector("#wqPromptOk").click(); }
+            });
+            mask.addEventListener("click", function (e) { if (e.target === mask) close(); });
+        }
         /* 渲染分类标签栏：全部 / 未分类 / 各分类（带题量、重命名、删除） */
         function renderWQCatTabs(list) {
             var tabsEl = document.getElementById("wqCatTabs");
@@ -7793,9 +7821,9 @@ var IndoorRouter = (function () {
             var cnt = function (pred) { return list.filter(pred).length; };
             var tab = function (id, label, n, color) {
                 var active = (_wqActiveCat === id);
-                var bg = active ? (color || "#7c3aed") : "#fff";
+                var bg = active ? (color || "#8b5cf6") : "#fff";
                 var fg = active ? "#fff" : (color || "#5b21b6");
-                var bd = active ? (color || "#7c3aed") : "#e2e8f0";
+                var bd = active ? (color || "#8b5cf6") : "#e2e8f0";
                 var delBtn = (id !== "all" && id !== "none")
                     ? '<span class="wq-cat-del" data-catdel="' + id + '" style="margin-left:4px;opacity:.8;cursor:pointer;padding:0 2px" title="删除分类">✕</span>'
                     : '';
@@ -7823,8 +7851,9 @@ var IndoorRouter = (function () {
                     if (id === "all" || id === "none") return;
                     var cat = cats.filter(function (c) { return c.id === id; })[0];
                     if (!cat) return;
-                    var nm = prompt("重命名分类：", cat.name);
-                    if (nm) { wqRenameCat(id, nm); openWQList(); }
+                    wqPrompt("重命名分类", cat.name, function (nm) {
+                        if (nm) { wqRenameCat(id, nm); openWQList(); }
+                    });
                 });
             });
             /* 删除分类 */
@@ -8403,11 +8432,11 @@ var IndoorRouter = (function () {
             _wqMultiQuestions.forEach(function (q, idx) {
                 var preview = (q.text || "").replace(/\s+/g, " ").slice(0, 70);
                 var statusBadge = "";
-                if (q.saved) statusBadge = '<span style="color:#7c3aed;font-size:11px">📌 已收录</span>';
+                if (q.saved) statusBadge = '<span style="color:#8b5cf6;font-size:11px">📌 已收录</span>';
                 else if (q.status === "done") statusBadge = '<span style="color:#10b981;font-size:11px">✅ 已分析</span>';
                 else if (q.status === "analyzing") statusBadge = '<span style="color:#f59e0b;font-size:11px">⏳ 分析中</span>';
                 else statusBadge = '<span style="color:#94a3b8;font-size:11px">⏸ 等待中</span>';
-                var activeCls = (idx === _wqActiveMultiIdx) ? 'border-color:#7c3aed;background:#f5f3ff;' : '';
+                var activeCls = (idx === _wqActiveMultiIdx) ? 'border-color:#8b5cf6;background:#f5f3ff;' : '';
                 html += '<div class="wq-multi-q-item" data-idx="' + idx + '" style="display:flex;align-items:flex-start;gap:8px;padding:8px 10px;margin-bottom:6px;background:#fff;border:1px solid #e2e8f0;border-radius:8px;cursor:pointer;transition:all .15s;' + activeCls + '">' +
                     '<span style="flex-shrink:0;width:24px;height:24px;background:#f97316;color:#fff;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700">' + (idx + 1) + '</span>' +
                     '<div style="flex:1;min-width:0;font-size:13px;color:#1e293b;line-height:1.5">' + esc(preview) + ((q.text || "").length > 70 ? "…" : "") +
@@ -8977,7 +9006,7 @@ var IndoorRouter = (function () {
                     /* AI 讲解区：主内容。有 Provider 时异步加载，无 Provider 时提示配置 */
                     if (hasAi) {
                         dh += '<div id="wqAiExplainBox" style="margin-top:8px">' +
-                            '<div style="color:#7c3aed;font-size:13px;padding:8px 0">📖 讲解生成中…</div>' +
+                            '<div style="color:#8b5cf6;font-size:13px;padding:8px 0">📖 讲解生成中…</div>' +
                             '</div>';
                     } else {
                         dh += '<div class="wq-deep-sec" style="background:#f0f9ff;border:1px solid #bae6fd;border-radius:8px;padding:10px 12px;color:#075985;font-size:13px;line-height:1.6">' +
@@ -9141,7 +9170,7 @@ var IndoorRouter = (function () {
                     var isTransfer = textSim(origText, q.text) < 0.4;
                     /* 归一化空白，避免 AI 输出带换行导致竖排 */
                     var qText = (q.text || "").replace(/[\r\n]+/g, " ").replace(/\s+/g, " ").trim();
-                    var genBadge = (q._generated || q._aiGenerated) ? '<span class="wq-transfer-tag" style="background:#7c3aed" title="系统智能推荐">📝 推荐</span>' : '';
+                    var genBadge = (q._generated || q._aiGenerated) ? '<span class="wq-transfer-tag" style="background:#8b5cf6" title="系统智能推荐">📝 推荐</span>' : '';
                     var layerBadge = (q._layer) ? '<span class="wq-transfer-tag" style="background:#059669" title="难度层级">' + esc(q._layer) + '</span>' : '';
                     html += '<div class="wq-rec-card' + (mastered === true ? ' mastered' : '') + (mastered === false ? ' not-mastered' : '') + '">' +
                         '<div class="wq-rec-q">' +
@@ -9644,7 +9673,7 @@ var IndoorRouter = (function () {
                                 '<select class="wq-cat-sel" data-wqcat="' + r.id + '" style="padding:4px 6px;border:1px solid #c4b5fd;border-radius:6px;font-size:12px;background:#f5f3ff;color:#5b21b6;cursor:pointer"><option value="">📂 移动到…</option>' + catOptions + '</select>' +
                                 '<button class="wq-search" data-wqsearch="' + r.id + '">🔄 重新分析</button>' +
                                 (r.analysis ? '<button class="wq-view-analysis" data-wqview="' + r.id + '" style="background:#0f766e;color:#fff">📖 查看原分析</button>' : '') +
-                                '<button class="wq-upload-good" data-wqupload="' + r.id + '" style="background:#7c3aed;color:#fff">⭐ 检验好题</button>' +
+                                '<button class="wq-upload-good" data-wqupload="' + r.id + '" style="background:#8b5cf6;color:#fff">⭐ 检验好题</button>' +
                                 '<button class="wq-del" data-wqdel="' + r.id + '">🗑 删除</button>' +
                             '</div>' +
                         '</div></div>';
@@ -9759,16 +9788,18 @@ var IndoorRouter = (function () {
             var admin = isBankAdmin();
             box.innerHTML = list.map(function (q) {
                 var diff = q.diff ? wqDiffBar(q.diff) : "";
-                return '<div class="fb-item" style="padding:10px 12px">' +
-                    '<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px">' +
-                    '<div style="flex:1">' +
-                    '<div><span class="wq-item-subject">' + esc(q.subject) + '</span>' +
-                    '<span class="wq-kp-tag small">' + esc(q.kp) + '</span>' + diff +
-                    '<span style="font-size:11px;color:#94a3b8;margin-left:6px">' + esc(q.source) + '</span></div>' +
-                    '<div class="wq-item-text" style="margin-top:4px">' + esc(q.text) + '</div>' +
-                    (q.answer ? '<div style="font-size:12px;color:#64748b;margin-top:4px"><b>答案：</b>' + esc(q.answer).slice(0, 120) + '</div>' : '') +
+                return '<div class="fb-item" style="padding:14px">' +
+                    '<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px">' +
+                    '<div style="flex:1;min-width:0">' +
+                    '<div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-bottom:8px">' +
+                    '<span class="wq-item-subject" style="font-size:12px;padding:3px 10px">' + esc(q.subject) + '</span>' +
+                    '<span class="wq-kp-tag small" style="font-size:12px">' + esc(q.kp) + '</span>' + diff +
+                    '<span style="font-size:11px;color:#94a3b8">' + esc(q.source) + '</span></div>' +
+                    '<div style="font-size:16px;color:#1e293b;line-height:1.7;font-weight:500;word-break:break-word">' + esc(q.text) + '</div>' +
+                    (q.answer ? '<div style="font-size:14px;color:#64748b;margin-top:8px;padding-top:8px;border-top:1px dashed #e2e8f0"><b style="color:#475569">答案：</b>' + esc(q.answer).slice(0, 200) + '</div>' : '') +
+                    (q.solution ? '<div style="font-size:13px;color:#64748b;margin-top:6px;line-height:1.6">' + esc(q.solution).slice(0, 200) + '</div>' : '') +
                     '</div>' +
-                    (admin ? '<button class="wq-del" data-bankdel="' + encodeURIComponent(q.subject) + '||' + encodeURIComponent(q.kp) + '||' + encodeURIComponent(q.text) + '" style="flex-shrink:0">🗑 删除</button>' : '') +
+                    (admin ? '<button class="wq-del" data-bankdel="' + encodeURIComponent(q.subject) + '||' + encodeURIComponent(q.kp) + '||' + encodeURIComponent(q.text) + '" style="flex-shrink:0;padding:6px 10px;font-size:13px">🗑 删除</button>' : '') +
                     '</div></div>';
             }).join("");
             if (admin) {
@@ -9840,7 +9871,7 @@ var IndoorRouter = (function () {
             html += '<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:12px">';
             html += statCard("📚 题库总量", total + " 题", "#3b82f6");
             html += statCard("🕐 最近更新", meta.updated_at ? fmtTime(meta.updated_at) : "—", "#10b981");
-            html += statCard("📤 用户上传", userSubs.filter(function (u) { return u.action === "user_submit"; }).length + " 次", "#7c3aed");
+            html += statCard("📤 用户上传", userSubs.filter(function (u) { return u.action === "user_submit"; }).length + " 次", "#8b5cf6");
             html += statCard("🤖 Worker 运行", cronRuns.length + " 次", "#f59e0b");
             html += "</div>";
             /* 低分预警 */
@@ -9856,7 +9887,7 @@ var IndoorRouter = (function () {
                 html += '</div>';
             }
             /* 用户上传记录 */
-            html += '<div style="margin-bottom:12px"><b style="font-size:13px;color:#7c3aed">📤 用户上传好题记录</b>';
+            html += '<div style="margin-bottom:12px"><b style="font-size:13px;color:#8b5cf6">📤 用户上传好题记录</b>';
             var subs = userSubs.filter(function (u) { return u.action === "user_submit"; });
             if (!subs.length) {
                 html += '<div style="color:#94a3b8;padding:6px 0">暂无用户上传</div>';
@@ -14340,24 +14371,29 @@ var currentIndoorBld = null;   // 当前进入楼内导航的楼栋（BUILDINGS 
                     showToast("已退出管理员");
                 } else {
                     if (wqBankPwdRow) {
-                        wqBankPwdRow.style.display = "block";
+                        wqBankPwdRow.style.display = "flex";
                         if (wqBankPwdInput) { wqBankPwdInput.value = ""; wqBankPwdInput.focus(); }
                     }
                 }
             });
-            if (wqBankPwdInput) wqBankPwdInput.addEventListener("keydown", function (e) {
-                if (e.key === "Enter") {
-                    if (wqBankPwdInput.value === WQ_BANK_ADMIN_PWD) {
-                        localStorage.setItem("wq_bank_admin", "1");
-                        refreshBankAdminUI();
-                        renderBankList(wqBankSearch ? wqBankSearch.value : "");
-                        showToast("✅ 管理员登录成功，可删除题库题目");
-                    } else {
-                        showToast("❌ 密码错误");
-                        wqBankPwdInput.value = "";
-                    }
+            /* 密码校验：回车或点登录按钮 */
+            function tryBankAdminLogin() {
+                if (!wqBankPwdInput) return;
+                if (wqBankPwdInput.value === WQ_BANK_ADMIN_PWD) {
+                    localStorage.setItem("wq_bank_admin", "1");
+                    refreshBankAdminUI();
+                    renderBankList(wqBankSearch ? wqBankSearch.value : "");
+                    showToast("✅ 管理员登录成功，可删除题库题目");
+                } else {
+                    showToast("❌ 密码错误");
+                    wqBankPwdInput.value = "";
                 }
+            }
+            if (wqBankPwdInput) wqBankPwdInput.addEventListener("keydown", function (e) {
+                if (e.key === "Enter") { e.preventDefault(); tryBankAdminLogin(); }
             });
+            var wqBankPwdSubmit = document.getElementById("wqBankPwdSubmit");
+            if (wqBankPwdSubmit) wqBankPwdSubmit.addEventListener("click", tryBankAdminLogin);
             var wqAdd = document.getElementById("wqAddBtn");
             if (wqAdd) wqAdd.addEventListener("click", function () { closeWQList(); openWQ(); });
             var wqAi = document.getElementById("wqAiBtn");
@@ -14379,12 +14415,13 @@ var currentIndoorBld = null;   // 当前进入楼内导航的楼栋（BUILDINGS 
             /* 新建分类 */
             var wqAddCat = document.getElementById("wqAddCatBtn");
             if (wqAddCat) wqAddCat.addEventListener("click", function () {
-                var nm = prompt("输入分类名称：", "");
-                if (nm !== null) {
-                    wqAddCat(nm);
-                    _wqActiveCat = "all";
-                    openWQList();
-                }
+                wqPrompt("新建分类", "", function (nm) {
+                    if (nm) {
+                        wqAddCat(nm);
+                        _wqActiveCat = "all";
+                        openWQList();
+                    }
+                });
             });
             /* 多题模式：返回题目列表 */
             var wqBackToList = document.getElementById("wqBackToList");
@@ -17770,7 +17807,7 @@ body.fire-mode #fireOverlay{display:flex}
       <div class="wq-ai-head">
         <span class="wq-ai-title">🔍 智能分析</span>
         <div style="display:flex;gap:6px;align-items:center">
-          <button type="button" id="wqBackToList" style="display:none;padding:4px 10px;background:#7c3aed;color:#fff;border:none;border-radius:6px;font-size:12px;cursor:pointer">← 题目列表</button>
+          <button type="button" id="wqBackToList" style="display:none;padding:4px 10px;background:#8b5cf6;color:#fff;border:none;border-radius:6px;font-size:12px;cursor:pointer">← 题目列表</button>
           <button type="button" id="wqAiRetry" class="wq-ai-retry">🔄 重新分析</button>
         </div>
       </div>
@@ -17840,7 +17877,7 @@ body.fire-mode #fireOverlay{display:flex}
     <div id="wqCatBar" style="padding:0 16px 10px">
       <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
         <span style="font-size:13px;font-weight:600;color:#334155">📁 我的分类</span>
-        <button type="button" id="wqAddCatBtn" style="padding:4px 10px;background:#7c3aed;color:#fff;border:none;border-radius:6px;font-size:12px;cursor:pointer">+ 新建分类</button>
+        <button type="button" id="wqAddCatBtn" style="padding:4px 10px;background:#8b5cf6;color:#fff;border:none;border-radius:6px;font-size:12px;cursor:pointer">+ 新建分类</button>
       </div>
       <div id="wqCatTabs" style="display:flex;gap:6px;flex-wrap:wrap"></div>
     </div>
@@ -17864,17 +17901,18 @@ body.fire-mode #fireOverlay{display:flex}
       <input type="text" id="wqBankSearch" placeholder="搜索题目内容/学科/知识点…" style="flex:1;min-width:160px;padding:8px 12px;border:1px solid #e2e8f0;border-radius:8px;font-size:13px;outline:none">
       <div id="wqBankAdminArea" style="display:flex;gap:6px;align-items:center">
         <button type="button" id="wqBankAdminBtn" style="padding:8px 14px;background:#1f2937;color:#fff;border:none;border-radius:8px;font-size:13px;cursor:pointer;white-space:nowrap">🔑 管理员登录</button>
-        <button type="button" id="wqBankMonitorBtn" style="display:none;padding:8px 14px;background:#7c3aed;color:#fff;border:none;border-radius:8px;font-size:13px;cursor:pointer;white-space:nowrap">📊 动向监控</button>
+        <button type="button" id="wqBankMonitorBtn" style="display:none;padding:8px 14px;background:#8b5cf6;color:#fff;border:none;border-radius:8px;font-size:13px;cursor:pointer;white-space:nowrap">📊 动向监控</button>
       </div>
     </div>
-    <div id="wqBankPwdRow" style="display:none;padding:0 16px 8px">
-      <input type="password" id="wqBankPwdInput" placeholder="输入管理员密码后回车" style="flex:1;padding:8px 12px;border:1px solid #e2e8f0;border-radius:8px;font-size:13px;outline:none;width:100%">
+    <div id="wqBankPwdRow" style="display:none;padding:0 16px 8px;gap:6px;align-items:center">
+      <input type="password" id="wqBankPwdInput" placeholder="输入管理员密码" style="flex:1;padding:10px 12px;border:1px solid #e2e8f0;border-radius:8px;font-size:15px;outline:none;width:100%">
+      <button type="button" id="wqBankPwdSubmit" style="padding:10px 16px;background:#1f2937;color:#fff;border:none;border-radius:8px;font-size:14px;cursor:pointer;white-space:nowrap">登录</button>
     </div>
     <!-- 开发者动向监控面板（仅管理员可见） -->
     <div id="wqBankMonitorPanel" style="display:none;padding:0 16px 12px">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
-        <b style="font-size:14px;color:#7c3aed">📊 题库动向监控</b>
-        <button type="button" id="wqBankMonitorRefresh" style="padding:4px 10px;background:#eef2ff;color:#4f46e5;border:none;border-radius:6px;font-size:12px;cursor:pointer">🔄 刷新</button>
+        <b style="font-size:14px;color:#8b5cf6">📊 题库动向监控</b>
+        <button type="button" id="wqBankMonitorRefresh" style="padding:4px 10px;background:#eef2ff;color:#6366f1;border:none;border-radius:6px;font-size:12px;cursor:pointer">🔄 刷新</button>
       </div>
       <div id="wqBankMonitorBody" style="font-size:12px;color:#475569;max-height:40vh;overflow-y:auto;background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:10px">
         加载中…
