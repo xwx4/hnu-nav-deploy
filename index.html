@@ -1379,16 +1379,25 @@ body.no-motion .layer-base.plan-loading::after { animation: none; }
     position: absolute; inset: 0; background: rgba(0,0,0,.55);
 }
 .photo-modal-box, .fb-modal-box, .fb-list-box {
-    position: relative; background: #fff; border-radius: 14px;
-    width: min(92vw, 520px); max-height: 88vh; overflow-y: auto;
-    padding: 20px; box-shadow: 0 12px 40px rgba(0,0,0,.3);
+    position: relative; background: linear-gradient(160deg, #ffffff 0%, #f8fafc 100%);
+    border-radius: 20px;
+    width: min(92vw, 560px); max-height: 88vh; overflow-y: auto;
+    padding: 22px; box-shadow: 0 24px 60px rgba(15,23,42,.35), 0 0 0 1px rgba(255,255,255,.6) inset;
+    animation: wqModalIn .25s ease;
 }
+@keyframes wqModalIn { from { opacity:0; transform: translateY(16px) scale(.97); } to { opacity:1; transform:none; } }
 .photo-modal-close, .fb-modal-close {
     position: absolute; top: 10px; right: 12px; background: none; border: none;
     font-size: 20px; cursor: pointer; color: #64748b;
 }
 .photo-modal-title, .fb-modal-title, .fb-list-title {
-    font-size: 18px; font-weight: 700; color: #1a3a6b; margin-bottom: 14px;
+    font-size: 20px; font-weight: 800; color: #0f172a; margin-bottom: 14px;
+    letter-spacing: -.3px;
+}
+.fb-list-title {
+    background: linear-gradient(135deg, #4f46e5, #7c3aed);
+    -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+    background-clip: text;
 }
 .photo-modal-img {
     width: 100%; aspect-ratio: 4/3; background: #f1f5f9; border-radius: 10px;
@@ -1441,10 +1450,17 @@ body.no-motion .layer-base.plan-loading::after { animation: none; }
     background: #f8fafc; padding: 10px 14px; border-radius: 8px; font-size: 14px;
     color: #475569; margin-bottom: 12px;
 }
-.fb-list-items { display: flex; flex-direction: column; gap: 8px; margin-bottom: 14px; }
+.fb-list-items { display: flex; flex-direction: column; gap: 12px; margin-bottom: 14px; }
 .fb-item {
-    border: 1px solid #e2e8f0; border-radius: 8px; padding: 10px 12px; font-size: 13px;
+    border: 1px solid #e2e8f0; border-radius: 14px; padding: 14px; font-size: 13px;
+    background: #fff; transition: all .2s ease; position: relative; overflow: hidden;
+    box-shadow: 0 1px 3px rgba(15,23,42,.04);
 }
+.fb-item::before {
+    content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 4px;
+    background: linear-gradient(180deg, #6366f1, #8b5cf6);
+}
+.fb-item:hover { transform: translateY(-2px); box-shadow: 0 8px 24px rgba(99,102,241,.12); border-color: #c7d2fe; }
 .fb-item-head { display: flex; justify-content: space-between; margin-bottom: 4px; }
 .fb-item-type { font-weight: 600; color: #1d4ed8; }
 .fb-item-time { color: #94a3b8; font-size: 12px; }
@@ -1522,16 +1538,18 @@ body.no-motion .layer-base.plan-loading::after { animation: none; }
 .wq-rec-adv .wq-rec-item { border-color: #fecaca; }
 .wq-rec-adv .wq-rec-item:hover { background: #fee2e2; }
 .wq-item-thumb {
-    width: 56px; height: 56px; border-radius: 6px; object-fit: cover; background: #f1f5f9;
-    flex: 0 0 auto;
+    width: 64px; height: 64px; border-radius: 10px; object-fit: cover; background: #f1f5f9;
+    flex: 0 0 auto; box-shadow: 0 2px 6px rgba(0,0,0,.08);
 }
 .wq-item-body { flex: 1; min-width: 0; }
-.wq-item-subject { display: inline-block; font-size: 11px; padding: 1px 8px; border-radius: 10px; background: #dbeafe; color: #1d4ed8; margin-right: 6px; }
+.wq-item-subject { display: inline-block; font-size: 11px; padding: 2px 10px; border-radius: 10px; background: linear-gradient(135deg,#dbeafe,#bfdbfe); color: #1e40af; margin-right: 6px; font-weight: 600; }
 .wq-item-qtype { font-size: 11px; color: #64748b; }
-.wq-item-text { font-size: 13px; color: #334155; margin-top: 4px; line-height: 1.4; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
-.wq-item-actions { display: flex; gap: 8px; margin-top: 6px; }
-.wq-item-actions button { background: none; border: 1px solid #e2e8f0; border-radius: 4px; padding: 2px 8px; font-size: 11px; cursor: pointer; color: #64748b; }
-.wq-item-actions .wq-search { color: #2563eb; border-color: #bfdbfe; }
+.wq-item-text { font-size: 13px; color: #1e293b; margin-top: 6px; line-height: 1.55; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+.wq-item-actions { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
+.wq-item-actions button { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 5px 10px; font-size: 12px; cursor: pointer; color: #475569; transition: all .15s; font-weight: 500; }
+.wq-item-actions button:hover { transform: translateY(-1px); box-shadow: 0 2px 6px rgba(0,0,0,.08); }
+.wq-item-actions .wq-search { color: #2563eb; border-color: #bfdbfe; background: #eff6ff; }
+.wq-item-actions .wq-del { color: #ef4444; border-color: #fecaca; background: #fef2f2; }
 .wq-ocr-tip { font-size: 12px; color: #64748b; background: #f0fdf4; border: 1px solid #bbf7d0; border-radius: 6px; padding: 6px 10px; margin-bottom: 10px; }
 .wq-kp-tags { display: flex; flex-wrap: wrap; gap: 4px; padding-top: 4px; }
 .wq-kp-tag { display: inline-block; font-size: 11px; padding: 2px 8px; border-radius: 10px; background: #ede9fe; color: #6d28d9; }
@@ -1576,7 +1594,6 @@ body.no-motion .layer-base.plan-loading::after { animation: none; }
 .wq-search-empty { text-align: center; color: #64748b; padding: 12px; font-size: 12px; line-height: 1.6; }
 .wq-tip-box { margin-top: 10px; padding-top: 10px; border-top: 1px dashed #fde68a; }
 .wq-tip-item { font-size: 12px; color: #92400e; line-height: 1.6; margin-bottom: 4px; }
-.wq-item-actions .wq-del { color: #ef4444; border-color: #fecaca; }
 
 /* ===== 10 级难度进度条 ===== */
 .wq-diffbar { display: inline-flex; align-items: center; gap: 4px; vertical-align: middle; }
@@ -7230,9 +7247,12 @@ var IndoorRouter = (function () {
             if (!WQ_AI_CONFIG.enabled) { cb(new Error("ai_disabled"), null); return; }
             var kpList = (kps && kps.length) ? kps.join("、") : "（未识别到明确知识点，请根据题目内容自行判断）";
             var isNonStd = (subject === "其他" || !kps || !kps.length);
+            var today = new Date();
+            var dateStr = today.getFullYear() + "年" + (today.getMonth() + 1) + "月" + today.getDate() + "日";
+            var timeAware = "\n【时效性校验】当前日期是 " + dateStr + "。若题目涉及年份、政策法规、统计数据、时事热点、汇率/利率/人口等时效性内容，请务必校验题目给出的信息是否与当前日期相符；若题目中的数据已过时或与当前事实不符，请在解答前明确指出并说明正确的时效性信息，再基于题目设定进行解答。";
             var sysPrompt = isNonStd
-                ? "你是一位辅导老师。请先判断题目的性质：如果这是一道标准学科题（数学/物理/化学/语文/英语等），请按学科题方式完整解答；如果这不是一道标准学科题（如脑筋急转弯、文学常识、玩笑题、主观讨论题等），请如实说明题目类型，然后给出合理、有趣的回答，不要硬套学科解题框架。回答要直接、具体，不要空话套话。"
-                : "你是一位" + (subject || "全科") + "教师。请直接解答这道题，给出完整的解题过程和最终答案。要求：①先点明考点和解题思路；②写出详细步骤；③给出最终答案；④提醒易错点。不要套话，直接讲题。";
+                ? "你是一位辅导老师。请先判断题目的性质：如果这是一道标准学科题（数学/物理/化学/语文/英语等），请按学科题方式完整解答；如果这不是一道标准学科题（如脑筋急转弯、文学常识、玩笑题、主观讨论题等），请如实说明题目类型，然后给出合理、有趣的回答，不要硬套学科解题框架。回答要直接、具体，不要空话套话。" + timeAware
+                : "你是一位" + (subject || "全科") + "教师。请直接解答这道题，给出完整的解题过程和最终答案。要求：①先点明考点和解题思路；②写出详细步骤；③给出最终答案；④提醒易错点。不要套话，直接讲题。" + timeAware;
             var messages = [
                 { role: "system", content: sysPrompt },
                 { role: "user", content: "学科：" + (subject || "未确定") + "\n知识点：" + kpList + "\n题目：" + text + "\n请解答并讲透这道题。" }
@@ -7671,12 +7691,156 @@ var IndoorRouter = (function () {
         var _wqMultiQueueBusy = false; // 后台分析队列是否运行中
         var _wqCurAnalysis = null;     // 当前题目的完整分析（讲解/母题/推荐），用于保存错题本和恢复
 
+        var WQ_STORAGE_VERSION = 2;  /* 错题存储格式版本号，更新时用于迁移 */
         function getWQ() {
-            try { return JSON.parse(localStorage.getItem(WQ_KEY) || "[]"); } catch (e) { return []; }
+            try {
+                var raw = localStorage.getItem(WQ_KEY);
+                if (!raw) return [];
+                var parsed = JSON.parse(raw);
+                /* 旧格式：直接是数组 → 迁移到带版本号的新格式，并备份旧数据 */
+                if (Array.isArray(parsed)) {
+                    try {
+                        localStorage.setItem(WQ_KEY + "_backup_v1_" + Date.now(), raw);
+                    } catch (e) {}
+                    var wrapped = { v: WQ_STORAGE_VERSION, data: parsed };
+                    try { localStorage.setItem(WQ_KEY, JSON.stringify(wrapped)); } catch (e) {}
+                    return parsed;
+                }
+                /* 新格式：{v, data} */
+                if (parsed && parsed.data && Array.isArray(parsed.data)) {
+                    return parsed.data;
+                }
+                return [];
+            } catch (e) { return []; }
         }
         function saveWQ(list) {
-            try { localStorage.setItem(WQ_KEY, JSON.stringify(list)); }
+            try {
+                /* 先读现有数据，合并后写入（防止覆盖） */
+                var existing = getWQ();
+                /* 传入的 list 是完整列表，直接写入；这里保证带版本号 */
+                var wrapped = { v: WQ_STORAGE_VERSION, data: list };
+                localStorage.setItem(WQ_KEY, JSON.stringify(wrapped));
+            }
             catch (e) { showToast("⚠ 错题本存储空间不足，图片可能较大"); }
+        }
+        /* 启动时数据安全自检：确保错题记录不丢、格式正确 */
+        function wqDataSafetyCheck() {
+            try {
+                var raw = localStorage.getItem(WQ_KEY);
+                if (!raw) return; /* 无数据，无需检查 */
+                var parsed = JSON.parse(raw);
+                var list = Array.isArray(parsed) ? parsed : (parsed && parsed.data ? parsed.data : null);
+                if (!Array.isArray(list)) {
+                    /* 数据损坏，尝试从备份恢复 */
+                    var keys = Object.keys(localStorage).filter(function (k) { return k.indexOf(WQ_KEY + "_backup_") === 0; });
+                    keys.sort().reverse();
+                    for (var i = 0; i < keys.length; i++) {
+                        try {
+                            var bk = JSON.parse(localStorage.getItem(keys[i]));
+                            if (Array.isArray(bk) && bk.length) {
+                                var wrapped = { v: WQ_STORAGE_VERSION, data: bk };
+                                localStorage.setItem(WQ_KEY, JSON.stringify(wrapped));
+                                console.warn("[错题本] 数据损坏，已从备份 " + keys[i] + " 恢复 " + bk.length + " 题");
+                                return;
+                            }
+                        } catch (e) {}
+                    }
+                }
+            } catch (e) { console.warn("[错题本] 数据安全自检异常：", e); }
+        }
+        /* ---- 错题本自定义分类 ---- */
+        var WQ_CAT_KEY = "wq_categories";
+        var _wqActiveCat = "all";  /* "all" | "none" | categoryId */
+        var WQ_CAT_COLORS = ["#7c3aed", "#2563eb", "#0891b2", "#059669", "#ea580c", "#dc2626", "#db2777", "#4f46e5", "#0d9488", "#ca8a04"];
+        function getWQCats() {
+            try { return JSON.parse(localStorage.getItem(WQ_CAT_KEY) || "[]"); } catch (e) { return []; }
+        }
+        function saveWQCats(cats) {
+            try { localStorage.setItem(WQ_CAT_KEY, JSON.stringify(cats)); } catch (e) {}
+        }
+        function wqAddCat(name) {
+            name = (name || "").trim();
+            if (!name) name = "分类 " + (getWQCats().length + 1);
+            var cats = getWQCats();
+            var cat = { id: "c" + Date.now(), name: name, color: WQ_CAT_COLORS[cats.length % WQ_CAT_COLORS.length], createdAt: Date.now() };
+            cats.push(cat);
+            saveWQCats(cats);
+            return cat;
+        }
+        function wqRenameCat(id, name) {
+            var cats = getWQCats();
+            var c = cats.filter(function (x) { return x.id === id; })[0];
+            if (c) { c.name = name.trim() || c.name; saveWQCats(cats); }
+        }
+        function wqDelCat(id) {
+            /* 删除分类：该分类下的错题 categoryId 置空（归入未分类），不删除题目 */
+            var cats = getWQCats().filter(function (x) { return x.id !== id; });
+            saveWQCats(cats);
+            var list = getWQ();
+            list.forEach(function (r) { if (r.categoryId === id) r.categoryId = null; });
+            saveWQ(list);
+        }
+        function wqSetItemCat(itemId, catId) {
+            var list = getWQ();
+            var r = list.filter(function (x) { return x.id === itemId; })[0];
+            if (r) { r.categoryId = catId || null; saveWQ(list); }
+        }
+        /* 渲染分类标签栏：全部 / 未分类 / 各分类（带题量、重命名、删除） */
+        function renderWQCatTabs(list) {
+            var tabsEl = document.getElementById("wqCatTabs");
+            if (!tabsEl) return;
+            var cats = getWQCats();
+            var cnt = function (pred) { return list.filter(pred).length; };
+            var tab = function (id, label, n, color) {
+                var active = (_wqActiveCat === id);
+                var bg = active ? (color || "#7c3aed") : "#fff";
+                var fg = active ? "#fff" : (color || "#5b21b6");
+                var bd = active ? (color || "#7c3aed") : "#e2e8f0";
+                var delBtn = (id !== "all" && id !== "none")
+                    ? '<span class="wq-cat-del" data-catdel="' + id + '" style="margin-left:4px;opacity:.8;cursor:pointer;padding:0 2px" title="删除分类">✕</span>'
+                    : '';
+                return '<span class="wq-cat-tab" data-catid="' + id + '" style="display:inline-flex;align-items:center;gap:4px;padding:5px 11px;border-radius:14px;font-size:12px;cursor:pointer;user-select:none;transition:all .15s;background:' + bg + ';color:' + fg + ';border:1px solid ' + bd + ';font-weight:' + (active ? '600' : '400') + '">' +
+                    label + ' <b style="opacity:.7">' + n + '</b>' + delBtn + '</span>';
+            };
+            var html = tab("all", "📚 全部", list.length, "#64748b") +
+                       tab("none", "📄 未分类", cnt(function (r) { return !r.categoryId; }), "#94a3b8") +
+                       cats.map(function (c) {
+                           return tab(c.id, "📁 " + c.name, cnt(function (r) { return r.categoryId === c.id; }), c.color);
+                       }).join("");
+            tabsEl.innerHTML = html;
+            /* 点击切换分类 */
+            tabsEl.querySelectorAll("[data-catid]").forEach(function (el) {
+                el.addEventListener("click", function (e) {
+                    if (e.target.classList.contains("wq-cat-del")) return;
+                    _wqActiveCat = el.getAttribute("data-catid");
+                    openWQList();
+                });
+            });
+            /* 重命名：双击分类标签 */
+            tabsEl.querySelectorAll(".wq-cat-tab").forEach(function (el) {
+                el.addEventListener("dblclick", function () {
+                    var id = el.getAttribute("data-catid");
+                    if (id === "all" || id === "none") return;
+                    var cat = cats.filter(function (c) { return c.id === id; })[0];
+                    if (!cat) return;
+                    var nm = prompt("重命名分类：", cat.name);
+                    if (nm) { wqRenameCat(id, nm); openWQList(); }
+                });
+            });
+            /* 删除分类 */
+            tabsEl.querySelectorAll("[data-catdel]").forEach(function (el) {
+                el.addEventListener("click", function (e) {
+                    e.stopPropagation();
+                    var id = el.getAttribute("data-catdel");
+                    var cat = cats.filter(function (c) { return c.id === id; })[0];
+                    if (!cat) return;
+                    if (confirm("删除分类「" + cat.name + "」？该分类下的错题将归入「未分类」，不会删除题目。")) {
+                        wqDelCat(id);
+                        if (_wqActiveCat === id) _wqActiveCat = "all";
+                        openWQList();
+                    }
+                });
+            });
         }
         function compressImage(file, maxW, quality, cb) {
             var reader = new FileReader();
@@ -8138,14 +8302,8 @@ var IndoorRouter = (function () {
 
         function runWQRecognize() {
             var text = (document.getElementById("wqText") || {}).value || "";
-            if (!text.trim()) {
-                if (_wqImg) {
-                    showToast("正在 OCR 识别图片文字…");
-                    runWQOcr();
-                    return;
-                }
-                showToast("请先上传错题图片或输入题目内容"); return;
-            }
+            if (!text.trim() && !_wqImg) { showToast("请先上传错题图片或输入题目内容"); return; }
+            /* 图片直传 AI 多模态：不再强制 OCR，文本框仅用于粘贴/手动输入补充 */
             var aiBtn = document.getElementById("wqAiBtn");
             if (aiBtn) { aiBtn.disabled = true; aiBtn.textContent = "⏳ 分析中…"; }
             /* 智能分析：学科/题型/难度(10级)/知识点/错因，有图片则直传AI多模态识别 */
@@ -8245,7 +8403,8 @@ var IndoorRouter = (function () {
             _wqMultiQuestions.forEach(function (q, idx) {
                 var preview = (q.text || "").replace(/\s+/g, " ").slice(0, 70);
                 var statusBadge = "";
-                if (q.status === "done") statusBadge = '<span style="color:#10b981;font-size:11px">✅ 已分析</span>';
+                if (q.saved) statusBadge = '<span style="color:#7c3aed;font-size:11px">📌 已收录</span>';
+                else if (q.status === "done") statusBadge = '<span style="color:#10b981;font-size:11px">✅ 已分析</span>';
                 else if (q.status === "analyzing") statusBadge = '<span style="color:#f59e0b;font-size:11px">⏳ 分析中</span>';
                 else statusBadge = '<span style="color:#94a3b8;font-size:11px">⏸ 等待中</span>';
                 var activeCls = (idx === _wqActiveMultiIdx) ? 'border-color:#7c3aed;background:#f5f3ff;' : '';
@@ -9294,8 +9453,17 @@ var IndoorRouter = (function () {
                 lastReviewedAt: null        /* 上次复习时间戳 */
             });
             saveWQ(list);
-            closeWQ();
-            showToast("✅ 已保存到错题本，共 " + list.length + " 题");
+            /* 多题模式下不关闭分析面板：用户可继续收录其他题，由用户点 X 决定是否结束 */
+            var isMulti = _wqMultiQuestions && _wqMultiQuestions.length > 1;
+            if (isMulti) {
+                /* 标记当前题为已保存，避免重复收录 */
+                if (_wqMultiQuestions[_wqActiveMultiIdx]) _wqMultiQuestions[_wqActiveMultiIdx].saved = true;
+                renderMultiQList();
+                showToast("✅ 已收录到错题本，可继续收录其他题目（点右上角 ✕ 结束）");
+            } else {
+                closeWQ();
+                showToast("✅ 已保存到错题本，共 " + list.length + " 题");
+            }
         }
 
         /* 捕获当前分析面板的完整内容，存入 _wqCurAnalysis 供错题本恢复 */
@@ -9414,6 +9582,9 @@ var IndoorRouter = (function () {
             }
             document.getElementById("wqListSummary").textContent = summary;
 
+            /* ---- 分类标签栏渲染 ---- */
+            renderWQCatTabs(list);
+
             /* 弱项分析：高频错因 + 薄弱知识点 */
             var weakEl = document.getElementById("wqWeakness");
             if (weakEl) {
@@ -9439,24 +9610,38 @@ var IndoorRouter = (function () {
             }
 
             var box = document.getElementById("wqListItems");
-            if (!list.length) {
-                box.innerHTML = '<div style="text-align:center;color:#94a3b8;padding:32px">📭 还没有错题，点击下方按钮录入第一道吧</div>';
+            /* 按当前选中分类筛选 */
+            var filtered = list.filter(function (r) {
+                if (_wqActiveCat === "all") return true;
+                if (_wqActiveCat === "none") return !r.categoryId;
+                return r.categoryId === _wqActiveCat;
+            });
+            if (!filtered.length) {
+                box.innerHTML = '<div style="text-align:center;color:#94a3b8;padding:32px">📭 当前分类下还没有错题</div>';
             } else {
-                box.innerHTML = list.map(function (r) {
+                box.innerHTML = filtered.map(function (r) {
                     var thumb = r.img ? '<img class="wq-item-thumb" src="' + r.img + '" alt="错题图">' : "";
                     var txt = r.text ? esc(r.text) : "（仅图片）";
                     var kpsHtml = (r.kps && r.kps.length) ? r.kps.slice(0, 3).map(function (k) { return '<span class="wq-kp-tag small">' + esc(k) + '</span>'; }).join("") : "";
                     var diffHtml = r.diff ? wqDiffBar(r.diff) : "";
                     var errObj = WQ_ERROR_TYPES.filter(function (t) { return t.id === r.error; })[0];
                     var errHtml = errObj ? '<span class="wq-item-error">' + errObj.icon + ' ' + esc(errObj.label) + '</span>' : "";
+                    /* 分类标签 */
+                    var catObj = getWQCats().filter(function (c) { return c.id === r.categoryId; })[0];
+                    var catBadge = catObj ? '<span style="display:inline-block;padding:1px 7px;border-radius:4px;font-size:11px;color:#fff;background:' + catObj.color + ';margin-left:4px">📁 ' + esc(catObj.name) + '</span>' : '';
+                    /* 移动到分类下拉 */
+                    var catOptions = '<option value="">未分类</option>' + getWQCats().map(function (c) {
+                        return '<option value="' + c.id + '"' + (r.categoryId === c.id ? ' selected' : '') + '>' + esc(c.name) + '</option>';
+                    }).join("");
                     return '<div class="fb-item" style="display:flex;gap:10px;align-items:flex-start">' +
                         thumb +
                         '<div class="wq-item-body">' +
                             '<div><span class="wq-item-subject">' + esc(r.subject || "其他") + '</span>' +
-                            '<span class="wq-item-qtype">' + esc(r.qtype || "其他") + ' · ' + r.at + '</span>' + diffHtml + errHtml + '</div>' +
+                            '<span class="wq-item-qtype">' + esc(r.qtype || "其他") + ' · ' + r.at + '</span>' + diffHtml + errHtml + catBadge + '</div>' +
                             (kpsHtml ? '<div class="wq-item-kps">' + kpsHtml + '</div>' : '') +
                             '<div class="wq-item-text">' + txt + '</div>' +
                             '<div class="wq-item-actions">' +
+                                '<select class="wq-cat-sel" data-wqcat="' + r.id + '" style="padding:4px 6px;border:1px solid #c4b5fd;border-radius:6px;font-size:12px;background:#f5f3ff;color:#5b21b6;cursor:pointer"><option value="">📂 移动到…</option>' + catOptions + '</select>' +
                                 '<button class="wq-search" data-wqsearch="' + r.id + '">🔄 重新分析</button>' +
                                 (r.analysis ? '<button class="wq-view-analysis" data-wqview="' + r.id + '" style="background:#0f766e;color:#fff">📖 查看原分析</button>' : '') +
                                 '<button class="wq-upload-good" data-wqupload="' + r.id + '" style="background:#7c3aed;color:#fff">⭐ 检验好题</button>' +
@@ -9464,6 +9649,15 @@ var IndoorRouter = (function () {
                             '</div>' +
                         '</div></div>';
                 }).join("");
+                /* 绑定分类移动下拉 */
+                box.querySelectorAll("[data-wqcat]").forEach(function (sel) {
+                    sel.addEventListener("change", function () {
+                        var id = Number(sel.getAttribute("data-wqcat"));
+                        wqSetItemCat(id, sel.value || null);
+                        showToast("✅ 已移动到「" + (sel.options[sel.selectedIndex].text || "未分类") + "」");
+                        openWQList();
+                    });
+                });
                 box.querySelectorAll("[data-wqdel]").forEach(function (b) {
                     b.addEventListener("click", function () {
                         var id = Number(b.getAttribute("data-wqdel"));
@@ -11756,12 +11950,29 @@ var currentIndoorBld = null;   // 当前进入楼内导航的楼栋（BUILDINGS 
                 if (showFeedback) showToast("定位失败（" + why + "），仍使用当前所选起点");
                 return;
             }
-            // errCode === 1：用户拒绝了定位权限（浏览器会记住该决定，需手动恢复）
+            // errCode === 1：用户拒绝了定位权限
             if (errCode === 1 || /denied|permission/i.test(why || "")) {
+                /* 先尝试一次浏览器原生定位重新申请权限：
+                 * QQ/X5 等内嵌浏览器往往不记住拒绝决定，每次调用都会弹权限框，
+                 * 这里直接绕过 AMap 走原生，给用户一次重新授权的机会。 */
+                if (navigator.geolocation) {
+                    if (showFeedback) showToast("正在重新申请定位权限…");
+                    navigator.geolocation.getCurrentPosition(function (p) {
+                        applyMyPos({ lng: p.coords.longitude, lat: p.coords.latitude }, p.coords.accuracy, showFeedback);
+                    }, function (err2) {
+                        // 原生也被拒 → 弹指引
+                        if (showFeedback) {
+                            showGeoPermissionGuide();
+                        } else {
+                            enterManualStart("定位权限被拒绝。可点地图任意位置设起点，或点「📍我的位置」重试。");
+                        }
+                    }, { enableHighAccuracy: true, timeout: 8000, maximumAge: 0 });
+                    return;
+                }
                 if (showFeedback) {
                     showGeoPermissionGuide();
                 } else {
-                    enterManualStart("定位权限被拒绝。可点地图任意位置设起点，或点「📍我的位置」重试并按指引恢复权限。");
+                    enterManualStart("定位权限被拒绝。可点地图任意位置设起点，或点「📍我的位置」重试。");
                 }
                 return;
             }
@@ -11785,15 +11996,26 @@ var currentIndoorBld = null;   // 当前进入楼内导航的楼栋（BUILDINGS 
                         '<b>电脑</b>：点地址栏左侧的 🔒 或 ⓘ 图标 → 「网站设置」→「位置」改为「允许」<br>' +
                         '改完后刷新页面即可。' +
                     '</div>' +
-                    '<div style="display:flex;gap:10px">' +
-                        '<button type="button" id="geoGuideRetry" style="flex:1;padding:10px;background:#2563eb;color:#fff;border:none;border-radius:8px;font-size:14px;cursor:pointer">🔄 我已改好，重试定位</button>' +
-                        '<button type="button" id="geoGuideManual" style="flex:1;padding:10px;background:#f1f5f9;color:#334155;border:none;border-radius:8px;font-size:14px;cursor:pointer">先用手动选点</button>' +
+                    '<div style="display:flex;gap:10px;flex-wrap:wrap">' +
+                        '<button type="button" id="geoGuideRetry" style="flex:1;min-width:140px;padding:10px;background:#2563eb;color:#fff;border:none;border-radius:8px;font-size:14px;cursor:pointer">🔄 重新申请定位权限</button>' +
+                        '<button type="button" id="geoGuideManual" style="flex:1;min-width:140px;padding:10px;background:#f1f5f9;color:#334155;border:none;border-radius:8px;font-size:14px;cursor:pointer">先用手动选点</button>' +
                     '</div>' +
                 '</div>';
             document.body.appendChild(mask);
             document.getElementById("geoGuideRetry").onclick = function () {
                 mask.remove(); _geoGuideShown = false;
-                locateMe(true);
+                /* 直接走浏览器原生定位重新申请权限（绕过 AMap 缓存的拒绝状态） */
+                if (navigator.geolocation) {
+                    showToast("正在申请定位权限…");
+                    navigator.geolocation.getCurrentPosition(function (p) {
+                        applyMyPos({ lng: p.coords.longitude, lat: p.coords.latitude }, p.coords.accuracy, true);
+                    }, function (err) {
+                        showToast("定位仍被拒绝，请在 QQ 右上角「…」→ 浏览器设置中允许定位，或先用手动选点");
+                        enterManualStart("定位权限被拒绝。可点地图任意位置设起点。");
+                    }, { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 });
+                } else {
+                    locateMe(true);
+                }
             };
             document.getElementById("geoGuideManual").onclick = function () {
                 mask.remove(); _geoGuideShown = false;
@@ -14154,6 +14376,16 @@ var currentIndoorBld = null;   // 当前进入楼内导航的楼栋（BUILDINGS 
             });
             var wqRetry = document.getElementById("wqAiRetry");
             if (wqRetry) wqRetry.addEventListener("click", runWQRecognize);
+            /* 新建分类 */
+            var wqAddCat = document.getElementById("wqAddCatBtn");
+            if (wqAddCat) wqAddCat.addEventListener("click", function () {
+                var nm = prompt("输入分类名称：", "");
+                if (nm !== null) {
+                    wqAddCat(nm);
+                    _wqActiveCat = "all";
+                    openWQList();
+                }
+            });
             /* 多题模式：返回题目列表 */
             var wqBackToList = document.getElementById("wqBackToList");
             if (wqBackToList) wqBackToList.addEventListener("click", function () {
@@ -14189,8 +14421,9 @@ var currentIndoorBld = null;   // 当前进入楼内导航的楼栋（BUILDINGS 
                         if (show) show.src = dataUrl;
                         if (prev) prev.style.display = "block";
                         if (label) label.style.display = "none";
-                        /* 上传后自动 OCR */
-                        setTimeout(runWQOcr, 300);
+                        /* 上传后直接进入分析，不再强制 OCR（图片直传AI多模态） */
+                        var ocrTip = document.getElementById("wqOcrTip");
+                        if (ocrTip) ocrTip.innerHTML = "✅ 图片已就绪，点「🔍 分析题目」即可（也可在下方文本框粘贴/输入补充说明）";
                     });
                     wqImgInput.value = "";
                 });
@@ -14221,6 +14454,9 @@ var currentIndoorBld = null;   // 当前进入楼内导航的楼栋（BUILDINGS 
 
             /* 遗忘曲线复习检查：有到期错题或累计达阈值时弹窗提醒 */
             try { if (typeof checkWQReview === "function") checkWQReview(); } catch (e) { /* 忽略 */ }
+
+            /* 数据安全自检：确保错题记录不丢失、格式正确（更新不丢数据） */
+            try { if (typeof wqDataSafetyCheck === "function") wqDataSafetyCheck(); } catch (e) { /* 忽略 */ }
 
             /* ---- 开发者模式：URL ?dev=1 显示题库后台 + AI 配置入口 ---- */
             try {
@@ -17600,6 +17836,14 @@ body.fire-mode #fireOverlay{display:flex}
     <div class="fb-list-title">📚 我的错题本</div>
     <div class="fb-list-summary" id="wqListSummary"></div>
     <div id="wqWeakness"></div>
+    <!-- 自定义分类区 -->
+    <div id="wqCatBar" style="padding:0 16px 10px">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+        <span style="font-size:13px;font-weight:600;color:#334155">📁 我的分类</span>
+        <button type="button" id="wqAddCatBtn" style="padding:4px 10px;background:#7c3aed;color:#fff;border:none;border-radius:6px;font-size:12px;cursor:pointer">+ 新建分类</button>
+      </div>
+      <div id="wqCatTabs" style="display:flex;gap:6px;flex-wrap:wrap"></div>
+    </div>
     <div class="fb-list-items" id="wqListItems"></div>
     <div class="fb-list-actions">
       <button type="button" class="wq-btn wq-btn-add" id="wqAddBtn">➕ 录入新错题</button>

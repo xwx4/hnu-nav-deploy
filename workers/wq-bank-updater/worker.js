@@ -25,14 +25,16 @@ const MODEL = {
   analyze:  "deepseek-v4.1-flash"  // 学科/知识点分析
 };
 
-/* 入库阈值：综合评分 >= 此值才入库 */
-const STORE_THRESHOLD = 0.7;
+/* 入库阈值：综合评分 >= 此值才入库（高级题门槛） */
+const STORE_THRESHOLD = 0.82;
 /* 每次 Cron 最多入库题数 */
 const MAX_STORE_PER_RUN = 12;
 /* 每知识点最少题数（低于此值优先补充） */
 const MIN_QUESTIONS_PER_KP = 2;
 /* 去重相似度阈值 */
 const DEDUP_SIM = 0.4;
+/* 最低难度门槛：只收录 L7 及以上的高级难题 */
+const MIN_DIFF = 7;
 
 /* 学科 & 常见知识点种子（用于自主扩展时选题） */
 const SUBJECT_SEEDS = {
@@ -88,11 +90,15 @@ function extractJSON(text) {
   return null;
 }
 
-/* ============ AI 生成候选题目 ============ */
+/* ============ AI 生成候选题目（仅高级难题 L7-L10） ============ */
 async function generateCandidates(subject, kp, count) {
-  var sysPrompt = "你是一位" + subject + "命题专家。请围绕知识点「" + kp + "】生成 " + count + " 道高质量题目。" +
-    "要求：题目真实可信（非编造）、有标准答案与解析、难度分布合理（1-10级）。" +
-    "严格按JSON数组返回：[{\"text\":\"题干\",\"answer\":\"答案\",\"solution\":\"解析\",\"diff\":1-10,\"source\":\"出题依据/来源说明\"}]";
+  var sysPrompt = "你是一位" + subject + "资深命题专家，擅长命制高考压轴题、竞赛题与深度综合探究题。" +
+    "请围绕知识点「" + kp + "」生成 " + count + " 道【高级难题】，严格要求：" +
+    "①难度必须在 L7-L10 之间（L7=综合建模，L8=思想方法，L9=拓展探究，L10=原创研究），严禁出简单识记/直接套用题；" +
+    "②题目真实可信、有深度、有区分度，最好基于高考真题/竞赛题改编或深度综合多个知识点；" +
+    "③必须附标准答案与详细解析；" +
+    "④若题目涉及时效性内容（如年份、政策、时事），请确保使用当前最新的真实数据，不得编造过时或错误信息。" +
+    "严格按JSON数组返回：[{\"text\":\"题干\",\"answer\":\"答案\",\"solution\":\"解析\",\"diff\":7-10,\"source\":\"出题依据/来源说明\"}]";
   var messages = [
     { role: "system", content: sysPrompt },
     { role: "user", content: "知识点：" + kp + "\n学科：" + subject }
@@ -100,7 +106,12 @@ async function generateCandidates(subject, kp, count) {
   var text = await callAI(messages, MODEL.generate);
   var arr = extractJSON(text);
   if (!Array.isArray(arr)) return [];
-  return arr.filter(function (q) { return q && q.text && q.text.length >= 10; });
+  return arr.filter(function (q) {
+    if (!q || !q.text || q.text.length < 10) return false;
+    /* 过滤掉低难度题 */
+    var d = parseInt(q.diff) || 0;
+    return d >= MIN_DIFF;
+  });
 }
 
 /* ============ AI 权威性评分 ============ */
@@ -230,6 +241,13 @@ async function runUpdate(KV) {
         /* 去重 */
         if (isDuplicate(bank, t.subject, t.kp, q.text)) {
           log.push("  候选" + (ci + 1) + " 重复，跳过");
+          continue;
+        }
+
+        /* 难度门槛：只收录 L7 及以上高级难题 */
+        var qDiff = Math.max(1, Math.min(10, parseInt(q.diff) || 0));
+        if (qDiff < MIN_DIFF) {
+          log.push("  候选" + (ci + 1) + " 难度 L" + qDiff + " < L" + MIN_DIFF + "，淘汰（仅收录高级难题）");
           continue;
         }
 

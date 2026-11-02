@@ -15,7 +15,7 @@ crons = ["0 */2 * * *"]
 # KV 命名空间绑定（需先创建并填入 id）
 [[kv_namespaces]]
 binding = "WQ_BANK_KV"
-id = "REPLACE_WITH_YOUR_KV_NAMESPACE_ID"
+id = "5416e48878264be68ef3abe3095c7e55"
 
 # 路由（可选）：绑定到自定义域名或 workers.dev 子域
 # routes = ["hnu-wq-bank-updater.<your-subdomain>.workers.dev/*"]
