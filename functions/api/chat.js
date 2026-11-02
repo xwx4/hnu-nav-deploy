@@ -33,6 +33,7 @@ export async function onRequestPost(context) {
   var model = body && body.model;
   var messages = body && body.messages;
   var stream = body && body.stream;
+  var reasoningEffort = body && body.reasoning_effort;
 
   if (!endpoint || !apiKey || !model || !Array.isArray(messages)) {
     return json({ error: "missing required fields: endpoint, apiKey, model, messages" }, 400);
@@ -43,13 +44,16 @@ export async function onRequestPost(context) {
   }
 
   try {
+    var reqBody = { model: model, messages: messages, stream: !!stream };
+    if (reasoningEffort) reqBody.reasoning_effort = reasoningEffort;
+
     var upstream = await fetch(endpoint, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
         "Authorization": "Bearer " + apiKey
       },
-      body: JSON.stringify({ model: model, messages: messages, stream: !!stream })
+      body: JSON.stringify(reqBody)
     });
 
     if (stream) {

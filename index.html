@@ -7001,7 +7001,8 @@ var IndoorRouter = (function () {
                     apiKey: provider.apiKey,
                     model: model,
                     messages: messages,
-                    stream: true
+                    stream: true,
+                    reasoning_effort: "none"
                 };
                 var timedOut = false;
                 var timer = setTimeout(function () {
@@ -7065,7 +7066,8 @@ var IndoorRouter = (function () {
                     endpoint: provider.endpoint,
                     apiKey: provider.apiKey,
                     model: modelOverride || provider.model,
-                    messages: messages
+                    messages: messages,
+                    reasoning_effort: "none"
                 };
                 var timedOut = false;
                 var timer = setTimeout(function () {
