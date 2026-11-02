@@ -6743,14 +6743,14 @@ var IndoorRouter = (function () {
             /* Tencent TokenHub 统一接入点 */
             endpoint: "https://tokenhub.tencentmaas.com/v1/chat/completions",
             apiKey: "sk-bHsivwabq4VodIU1tXxAjWUOOEkrlA65UFoRSrJ7C2fWPPrW",
-            /* 模型路由：根据任务类型选择最合适的模型 */
+            /* 模型路由：根据任务类型选择最合适的模型（主模型 + 降级备选） */
             modelRouter: {
-                analyze:  "deepseek-v4.1-flash",       /* 学科/题型/难度/知识点分析（快、省） */
-                explain:  "deepseek-v4-pro",           /* 讲透原题/母题/知识点（推理强） */
-                generate: "kimi-k3.1-pro",             /* 生成推荐题/变式题（生成质量高） */
-                score:    "deepseek-v4.1-flash",       /* 质量评分/权威性判断 */
-                mother:   "deepseek-v4-pro",           /* 母题溯源 */
-                recommend:"kimi-k3.1-pro"              /* 分层推荐 */
+                analyze:  ["deepseek-v4.1-flash", "glm-5.3", "hy3"],       /* 学科/题型/难度/知识点分析（快、省） */
+                explain:  ["deepseek-v4-pro", "glm-5.3", "kimi-k3.1-pro"], /* 讲透原题/母题/知识点（推理强） */
+                generate: ["kimi-k3.1-pro", "deepseek-v4-pro", "glm-5.3"],/* 生成推荐题/变式题（生成质量高） */
+                score:    ["deepseek-v4.1-flash", "glm-5.3", "hy3"],       /* 质量评分/权威性判断 */
+                mother:   ["deepseek-v4-pro", "glm-5.3", "kimi-k3.1-pro"], /* 母题溯源 */
+                recommend:["kimi-k3.1-pro", "deepseek-v4-pro", "glm-5.3"] /* 分层推荐 */
             },
             /* 默认 Provider（兼容旧逻辑） */
             providers: [
@@ -6936,20 +6936,37 @@ var IndoorRouter = (function () {
          * 多 AI 路由器：并行调用多个 Provider，评分选最优
          * ================================================================ */
         var WQ_AI_ROUTER = {
-            /* 模型路由：根据任务类型返回最合适的模型名 */
-            selectModel: function (taskType) {
+            /* 模型路由：根据任务类型返回模型列表（主模型优先，失败时降级） */
+            selectModels: function (taskType) {
                 var router = WQ_AI_CONFIG.modelRouter || {};
-                return router[taskType] || (WQ_AI_CONFIG.providers[0] && WQ_AI_CONFIG.providers[0].model) || "deepseek-v4-pro";
+                var models = router[taskType];
+                if (Array.isArray(models)) return models;
+                if (typeof models === "string") return [models];
+                return [(WQ_AI_CONFIG.providers[0] && WQ_AI_CONFIG.providers[0].model) || "deepseek-v4-pro"];
+            },
+            selectModel: function (taskType) {
+                return this.selectModels(taskType)[0];
             },
 
-            /* 单次调用（带模型路由）—— 大多数场景用这个 */
+            /* 单次调用（带模型路由 + 自动降级重试） */
             call: function (messages, taskType, cb) {
                 var self = this;
                 var providers = enabledProviders();
                 if (!providers.length) { cb(new Error("no_ai_provider"), null); return; }
                 var provider = providers[0];
-                var model = self.selectModel(taskType);
-                self._callProvider(provider, messages, cb, model);
+                var models = self.selectModels(taskType);
+                var idx = 0;
+                function tryNext() {
+                    if (idx >= models.length) { cb(new Error("all_models_failed"), null); return; }
+                    var model = models[idx++];
+                    self._callProvider(provider, messages, function (err, res) {
+                        if (!err && res) { cb(null, res); return; }
+                        /* 失败（含 402 付费墙/超时）→ 降级到下一个模型 */
+                        console.warn("[AI Router] model " + model + " failed: " + (err && err.message) + ", trying fallback…");
+                        tryNext();
+                    }, model);
+                }
+                tryNext();
             },
 
             /* 调用单个 Provider —— 通过 Pages Function 代理转发（规避 CORS） */
