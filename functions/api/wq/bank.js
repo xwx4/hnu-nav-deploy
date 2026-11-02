@@ -35,14 +35,18 @@ export async function onRequestGet(context) {
     var bank = raw ? JSON.parse(raw) : {};
     var metaRaw = await KV.get("wq_bank_meta");
     var meta = metaRaw ? JSON.parse(metaRaw) : null;
-    /* 开发者监控：用户上传日志 + Worker Cron 运行记录 */
+    /* 开发者监控：用户上传日志 + Worker Cron 运行记录（兼容旧格式） */
     var userLogRaw = await KV.get("wq_bank_log");
     var cronLogRaw = await KV.get("wq_bank_cron_log");
+    var userSubs = [];
+    try { var p = userLogRaw ? JSON.parse(userLogRaw) : []; userSubs = Array.isArray(p) ? p : []; } catch (e) {}
+    var cronRuns = [];
+    try { var c = cronLogRaw ? JSON.parse(cronLogRaw) : []; cronRuns = Array.isArray(c) ? c : []; } catch (e) {}
     return json({
       bank: bank,
       meta: meta,
-      userSubmissions: userLogRaw ? JSON.parse(userLogRaw) : [],
-      cronRuns: cronLogRaw ? JSON.parse(cronLogRaw) : []
+      userSubmissions: userSubs,
+      cronRuns: cronRuns
     });
   } catch (e) {
     return json({ error: "read failed: " + (e && e.message ? e.message : String(e)) }, 500);
@@ -101,9 +105,13 @@ export async function onRequestPost(context) {
     };
     node.questions.push(record);
     await KV.put("wq_bank_shared", JSON.stringify(bank));
-    /* 记录开发者审计日志 */
+    /* 记录开发者审计日志（兼容旧格式：旧 worker 曾写入 {time,log:[]} 对象） */
     var logRaw = await KV.get("wq_bank_log");
-    var log = logRaw ? JSON.parse(logRaw) : [];
+    var log = [];
+    try {
+      var parsed = logRaw ? JSON.parse(logRaw) : [];
+      log = Array.isArray(parsed) ? parsed : [];
+    } catch (e) { log = []; }
     log.unshift({
       at: new Date().toISOString(),
       action: "user_submit",
