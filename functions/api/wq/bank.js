@@ -7,7 +7,9 @@
  */
 
 function json(data, status) {
-  return new Response(JSON.stringify(data), {
+  var body;
+  try { body = JSON.stringify(data); } catch (e) { body = '{"error":"json_stringify_failed"}'; }
+  return new Response(body || "null", {
     status: status || 200,
     headers: {
       "Content-Type": "application/json; charset=utf-8",
@@ -18,18 +20,24 @@ function json(data, status) {
 }
 
 export async function onRequestGet(context) {
-  var KV = context.env && context.env.WQ_BANK_KV;
-  if (!KV) {
-    return json({ error: "KV namespace WQ_BANK_KV not bound. Please bind it in Pages Settings → Functions → KV namespace bindings." }, 500);
-  }
   try {
+    var env = context.env || {};
+    var KV = env.WQ_BANK_KV;
+    if (!KV || typeof KV.get !== "function") {
+      var keys = Object.keys(env);
+      return json({
+        error: "KV namespace WQ_BANK_KV not bound",
+        hint: "在 Cloudflare Pages → Settings → Functions → KV namespace bindings 中绑定名称 WQ_BANK_KV",
+        bound_env_keys: keys
+      }, 500);
+    }
     var raw = await KV.get("wq_bank_shared");
     var bank = raw ? JSON.parse(raw) : {};
     var metaRaw = await KV.get("wq_bank_meta");
     var meta = metaRaw ? JSON.parse(metaRaw) : null;
     return json({ bank: bank, meta: meta });
   } catch (e) {
-    return json({ error: "read failed: " + e.message }, 500);
+    return json({ error: "read failed: " + (e && e.message ? e.message : String(e)) }, 500);
   }
 }
 
