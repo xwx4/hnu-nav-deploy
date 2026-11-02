@@ -9146,7 +9146,10 @@ var IndoorRouter = (function () {
                 diff: _wqDiff,
                 error: _wqError,
                 analysis: _wqCurAnalysis,   /* 完整分析快照，再次打开可恢复 */
-                at: new Date().toLocaleString("zh-CN", { hour12: false })
+                at: new Date().toLocaleString("zh-CN", { hour12: false }),
+                atTs: Date.now(),           /* 数字时间戳，用于遗忘曲线计算 */
+                reviewCount: 0,             /* 已复习次数 */
+                lastReviewedAt: null        /* 上次复习时间戳 */
             });
             saveWQ(list);
             closeWQ();
@@ -9314,6 +9317,7 @@ var IndoorRouter = (function () {
                             '<div class="wq-item-actions">' +
                                 '<button class="wq-search" data-wqsearch="' + r.id + '">🔄 重新分析</button>' +
                                 (r.analysis ? '<button class="wq-view-analysis" data-wqview="' + r.id + '" style="background:#0f766e;color:#fff">📖 查看原分析</button>' : '') +
+                                '<button class="wq-upload-good" data-wqupload="' + r.id + '" style="background:#7c3aed;color:#fff">⭐ 检验好题</button>' +
                                 '<button class="wq-del" data-wqdel="' + r.id + '">🗑 删除</button>' +
                             '</div>' +
                         '</div></div>';
@@ -9350,6 +9354,14 @@ var IndoorRouter = (function () {
                         }
                     });
                 });
+                /* 检验好题并上传共享题库：程序评分 + AI权威性评分 → 达标则上传 */
+                box.querySelectorAll("[data-wqupload]").forEach(function (b) {
+                    b.addEventListener("click", function () {
+                        var id = Number(b.getAttribute("data-wqupload"));
+                        var item = getWQ().filter(function (r) { return r.id === id; })[0];
+                        if (item) verifyAndUploadGoodQuestion(item, b);
+                    });
+                });
             }
             modal.classList.add("show");
             modal.setAttribute("aria-hidden", "false");
@@ -9370,7 +9382,22 @@ var IndoorRouter = (function () {
             modal.setAttribute("aria-hidden", "false");
             /* 管理员按钮状态 */
             var adminBtn = document.getElementById("wqBankAdminBtn");
-            if (adminBtn) adminBtn.textContent = isBankAdmin() ? "✅ 管理员（点击退出）" : "🔑 管理员登录";
+            var monitorBtn = document.getElementById("wqBankMonitorBtn");
+            var monitorPanel = document.getElementById("wqBankMonitorPanel");
+            if (adminBtn) {
+                if (isBankAdmin()) {
+                    adminBtn.textContent = "✅ 管理员（退出）";
+                    adminBtn.style.background = "#0f766e";
+                    if (monitorBtn) monitorBtn.style.display = "inline-block";
+                } else {
+                    adminBtn.textContent = "🔑 管理员登录";
+                    adminBtn.style.background = "#1f2937";
+                    if (monitorBtn) monitorBtn.style.display = "none";
+                    if (monitorPanel) monitorPanel.style.display = "none";
+                }
+            }
+            var pwdRow = document.getElementById("wqBankPwdRow");
+            if (pwdRow) pwdRow.style.display = "none";
         }
         function closeBankModal() {
             var m = document.getElementById("wqBankModal");
@@ -9405,14 +9432,14 @@ var IndoorRouter = (function () {
                     '<div class="wq-item-text" style="margin-top:4px">' + esc(q.text) + '</div>' +
                     (q.answer ? '<div style="font-size:12px;color:#64748b;margin-top:4px"><b>答案：</b>' + esc(q.answer).slice(0, 120) + '</div>' : '') +
                     '</div>' +
-                    (admin ? '<button class="wq-del" data-bankdel="' + esc(q.subject) + '||' + esc(q.kp) + '||' + esc(q.text) + '" style="flex-shrink:0">🗑 删除</button>' : '') +
+                    (admin ? '<button class="wq-del" data-bankdel="' + encodeURIComponent(q.subject) + '||' + encodeURIComponent(q.kp) + '||' + encodeURIComponent(q.text) + '" style="flex-shrink:0">🗑 删除</button>' : '') +
                     '</div></div>';
             }).join("");
             if (admin) {
                 box.querySelectorAll("[data-bankdel]").forEach(function (b) {
                     b.addEventListener("click", function () {
                         var parts = b.getAttribute("data-bankdel").split("||");
-                        var sub = parts[0], kp = parts[1], txt = parts[2];
+                        var sub = decodeURIComponent(parts[0] || ""), kp = decodeURIComponent(parts[1] || ""), txt = decodeURIComponent(parts[2] || "");
                         if (confirm("确定从题库删除此题？")) {
                             var ok = WQ_PIPELINE_B.removeQuestion(sub, kp, txt);
                             showToast(ok ? "✅ 已删除" : "⚠ 删除失败");
@@ -9421,6 +9448,511 @@ var IndoorRouter = (function () {
                     });
                 });
             }
+        }
+
+        /* ================================================================
+         * 开发者动向监控面板（仅管理员可见）
+         * 展示：题库统计 / 用户上传好题记录 / Worker 自主更新记录 / 低分预警
+         * ================================================================ */
+        function toggleBankMonitor() {
+            var panel = document.getElementById("wqBankMonitorPanel");
+            if (!panel) return;
+            if (panel.style.display === "none") {
+                panel.style.display = "block";
+                loadBankMonitor();
+            } else {
+                panel.style.display = "none";
+            }
+        }
+        function loadBankMonitor() {
+            var body = document.getElementById("wqBankMonitorBody");
+            if (!body) return;
+            body.innerHTML = '<div style="text-align:center;color:#94a3b8;padding:16px">⏳ 加载中…</div>';
+            fetch("/api/wq/bank", { cache: "no-store" })
+                .then(function (r) { return r.json(); })
+                .then(function (data) {
+                    if (!data || data.error) {
+                        body.innerHTML = '<div style="color:#dc2626">❌ 加载失败：' + (data && data.error || "未知错误") + "</div>";
+                        return;
+                    }
+                    renderBankMonitor(data);
+                })
+                .catch(function (e) {
+                    body.innerHTML = '<div style="color:#dc2626">❌ 网络错误：' + e.message + "</div>";
+                });
+        }
+        function renderBankMonitor(data) {
+            var body = document.getElementById("wqBankMonitorBody");
+            if (!body) return;
+            var meta = data.meta || {};
+            var userSubs = Array.isArray(data.userSubmissions) ? data.userSubmissions : [];
+            var cronRuns = Array.isArray(data.cronRuns) ? data.cronRuns : [];
+            var bank = data.bank || {};
+            /* 统计总题数 */
+            var total = 0, subCnt = {};
+            for (var s in bank) {
+                var kps = bank[s] || {};
+                var subTotal = 0;
+                for (var k in kps) subTotal += ((kps[k] && kps[k].questions) || []).length;
+                subCnt[s] = subTotal;
+                total += subTotal;
+            }
+            /* 低分预警：用户上传且评分 < 0.7 的题 */
+            var lowScore = userSubs.filter(function (u) { return u.action === "user_submit" && (u.score || 0) < 0.7; });
+            var html = "";
+            /* 顶部统计 */
+            html += '<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:12px">';
+            html += statCard("📚 题库总量", total + " 题", "#3b82f6");
+            html += statCard("🕐 最近更新", meta.updated_at ? fmtTime(meta.updated_at) : "—", "#10b981");
+            html += statCard("📤 用户上传", userSubs.filter(function (u) { return u.action === "user_submit"; }).length + " 次", "#7c3aed");
+            html += statCard("🤖 Worker 运行", cronRuns.length + " 次", "#f59e0b");
+            html += "</div>";
+            /* 低分预警 */
+            if (lowScore.length) {
+                html += '<div style="background:#fef2f2;border:1px solid #fecaca;border-radius:8px;padding:10px;margin-bottom:12px">';
+                html += '<b style="color:#dc2626;font-size:13px">⚠️ 低分预警（' + lowScore.length + ' 道评分 < 0.7，建议人工复核）</b>';
+                lowScore.slice(0, 10).forEach(function (u) {
+                    html += '<div style="margin-top:6px;font-size:12px;color:#7f1d1d">';
+                    html += '[' + esc(u.subject) + '/' + esc(u.kp) + '] <b>评分 ' + (u.score || 0).toFixed(2) + '</b> · ' + fmtTime(u.at) + '<br>';
+                    html += esc((u.text || "").slice(0, 120));
+                    html += '</div>';
+                });
+                html += '</div>';
+            }
+            /* 用户上传记录 */
+            html += '<div style="margin-bottom:12px"><b style="font-size:13px;color:#7c3aed">📤 用户上传好题记录</b>';
+            var subs = userSubs.filter(function (u) { return u.action === "user_submit"; });
+            if (!subs.length) {
+                html += '<div style="color:#94a3b8;padding:6px 0">暂无用户上传</div>';
+            } else {
+                subs.slice(0, 20).forEach(function (u) {
+                    var scoreColor = (u.score || 0) >= 0.8 ? "#10b981" : (u.score || 0) >= 0.6 ? "#f59e0b" : "#dc2626";
+                    html += '<div style="padding:6px 8px;background:#fff;border:1px solid #e2e8f0;border-radius:6px;margin-top:6px">';
+                    html += '<div style="display:flex;justify-content:space-between;gap:8px">';
+                    html += '<span style="font-weight:600;color:#334155">' + esc(u.subject) + ' / ' + esc(u.kp) + '</span>';
+                    html += '<span style="color:' + scoreColor + ';font-weight:700">' + (u.score || 0).toFixed(2) + '</span>';
+                    html += '</div>';
+                    html += '<div style="color:#64748b;margin-top:2px">' + esc((u.text || "").slice(0, 150)) + '</div>';
+                    html += '<div style="color:#94a3b8;font-size:11px;margin-top:2px">' + fmtTime(u.at) + '</div>';
+                    html += '</div>';
+                });
+            }
+            html += '</div>';
+            /* Worker 自主更新记录 */
+            html += '<div><b style="font-size:13px;color:#f59e0b">🤖 Worker 自主更新记录</b>';
+            if (!cronRuns.length) {
+                html += '<div style="color:#94a3b8;padding:6px 0">暂无 Worker 运行记录</div>';
+            } else {
+                cronRuns.slice(0, 10).forEach(function (r) {
+                    html += '<div style="padding:6px 8px;background:#fff;border:1px solid #e2e8f0;border-radius:6px;margin-top:6px">';
+                    html += '<div style="display:flex;justify-content:space-between;gap:8px">';
+                    html += '<span><b style="color:#10b981">入库 ' + (r.stored || 0) + '</b> / 尝试 ' + (r.attempted || 0) + '</span>';
+                    html += '<span style="color:#94a3b8;font-size:11px">' + fmtTime(r.time) + '</span>';
+                    html += '</div>';
+                    if (r.log && r.log.length) {
+                        html += '<div style="color:#64748b;margin-top:4px;font-size:11px;white-space:pre-wrap;max-height:60px;overflow-y:auto">' + esc(r.log.join("\n")) + '</div>';
+                    }
+                    html += '</div>';
+                });
+            }
+            html += '</div>';
+            body.innerHTML = html;
+        }
+        function statCard(label, val, color) {
+            return '<div style="background:#fff;border:1px solid #e2e8f0;border-radius:8px;padding:8px 10px;border-left:3px solid ' + color + '">' +
+                '<div style="font-size:11px;color:#94a3b8">' + label + '</div>' +
+                '<div style="font-size:15px;font-weight:700;color:#1e293b;margin-top:2px">' + val + '</div></div>';
+        }
+        function fmtTime(iso) {
+            if (!iso) return "—";
+            try {
+                var d = new Date(iso);
+                var pad = function (n) { return n < 10 ? "0" + n : "" + n; };
+                return d.getFullYear() + "-" + pad(d.getMonth() + 1) + "-" + pad(d.getDate()) + " " + pad(d.getHours()) + ":" + pad(d.getMinutes());
+            } catch (e) { return iso; }
+        }
+
+        /* ================================================================
+         * 好题检验 + 上传共享题库
+         * 检验流程（面向所有用户）：
+         *   ① 程序评分（题面完整度/难度合理/知识点/非雷同）
+         *   ② AI 权威性评分（真实性/可答性/相关性/清晰度）+ 生成标准答案
+         *   ③ 综合评分 = 程序*0.5 + AI*0.5 >= 0.6 → 允许上传
+         *   ④ 上传到共享题库（POST /api/wq/bank），所有用户可见
+         * ================================================================ */
+        function verifyAndUploadGoodQuestion(item, btn) {
+            if (!item || !item.text) { showToast("题目内容为空"); return; }
+            if (btn) { btn.disabled = true; btn.textContent = "⏳ 检验中…"; }
+            var targetQ = {
+                text: item.text, answer: "", solution: "", idea: "",
+                diff: item.diff || 5, kp: item.kps || [], subject: item.subject
+            };
+            /* ① 程序评分 */
+            var ruleScore = calcQuestionQuality(targetQ);
+            /* ② AI 权威性评分 + 生成答案 */
+            if (WQ_AI_CONFIG.enabled && enabledProviders().length) {
+                aiVerifyAndAnswerQuestion(targetQ, function (err, aiRes) {
+                    if (err || !aiRes) {
+                        if (btn) { btn.disabled = false; btn.textContent = "⭐ 检验好题"; }
+                        showToast("AI 检验失败，请稍后重试");
+                        return;
+                    }
+                    var aiScore = aiRes.total;
+                    var finalScore = ruleScore * 0.5 + aiScore * 0.5;
+                    if (finalScore >= 0.6 && aiRes.answer) {
+                        targetQ.answer = aiRes.answer;
+                        targetQ.solution = aiRes.solution || "";
+                        targetQ.score = finalScore;
+                        /* ③ 上传共享题库 */
+                        uploadQuestionToSharedBank(targetQ, finalScore, function (ok, msg) {
+                            if (btn) { btn.disabled = false; }
+                            if (ok) {
+                                if (btn) btn.textContent = "✅ 已上传";
+                                showToast("⭐ 检验通过（综合" + finalScore.toFixed(2) + "），已上传共享题库！所有用户可见");
+                            } else {
+                                if (btn) btn.textContent = "⭐ 检验好题";
+                                showToast("上传失败：" + (msg || "未知原因"));
+                            }
+                        });
+                    } else {
+                        if (btn) { btn.disabled = false; btn.textContent = "⭐ 检验好题"; }
+                        showToast("检验未通过（综合" + finalScore.toFixed(2) + "），未达标阈值0.6。原因：" + (aiRes.reason || ""));
+                    }
+                });
+            } else {
+                /* 无 AI，仅用程序评分 */
+                if (ruleScore >= 0.6) {
+                    showToast("AI未启用，仅程序评分" + ruleScore.toFixed(2) + "，无法生成标准答案，暂不上传");
+                } else {
+                    showToast("程序评分" + ruleScore.toFixed(2) + "未达标");
+                }
+                if (btn) { btn.disabled = false; btn.textContent = "⭐ 检验好题"; }
+            }
+        }
+        /* AI 检验题目质量并生成标准答案 */
+        function aiVerifyAndAnswerQuestion(q, cb) {
+            if (!WQ_AI_CONFIG.enabled) { cb(new Error("ai_disabled"), null); return; }
+            var sysPrompt = "你是一位严谨的教研审核员。请检验这道题的质量并给出标准答案。严格按JSON返回：" +
+                '{"authority":0-1,"answerable":0-1,"relevant":0-1,"clarity":0-1,"answer":"标准答案","solution":"简要解析","reason":"简短说明"}' +
+                "评分：authority=真实可信非编造；answerable=有明确答案；relevant=与知识点匹配；clarity=表述清晰。answer必须是该题的正确答案。";
+            var qInfo = "题干：" + (q.text || "") +
+                "\n学科：" + (q.subject || "其他") +
+                "\n知识点：" + ((q.kp || []).join("、") || "未知") +
+                "\n难度：L" + (q.diff || 5);
+            var messages = [
+                { role: "system", content: sysPrompt },
+                { role: "user", content: qInfo }
+            ];
+            WQ_AI_ROUTER.call(messages, "score", function (err, res) {
+                if (err) { cb(err, null); return; }
+                try {
+                    var m = res.text.match(/\{[\s\S]*\}/);
+                    var obj = m ? JSON.parse(m[0]) : null;
+                    if (!obj) { cb(new Error("parse_failed"), null); return; }
+                    var w = WQ_AI_CONFIG.qualityWeights || { ai: 0.4, answer: 0.3, source: 0.2, dedup: 0.1 };
+                    var total = (obj.authority || 0) * w.ai + (obj.answerable || 0) * w.answer +
+                                (obj.relevant || 0) * w.source + (obj.clarity || 0) * w.dedup;
+                    cb(null, { total: Math.min(1, total), answer: obj.answer || "", solution: obj.solution || "", reason: obj.reason || "" });
+                } catch (e) { cb(e, null); }
+            });
+        }
+        /* 上传题目到共享题库 */
+        function uploadQuestionToSharedBank(q, score, cb) {
+            var payload = {
+                question: {
+                    text: q.text, answer: q.answer, idea: q.idea || "", solution: q.solution || "",
+                    pitfall: q.pitfall || "", method: q.method || "", diff: q.diff || 5,
+                    kps: q.kp || [], subject: q.subject, ability: q.ability || [], score: score
+                }
+            };
+            try {
+                fetch("/api/wq/bank", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify(payload)
+                }).then(function (r) { return r.json(); }).then(function (data) {
+                    cb(data && data.ok, data && (data.msg || data.error || data.reason));
+                }).catch(function (e) { cb(false, e.message); });
+            } catch (e) { cb(false, e.message); }
+        }
+
+        /* ================================================================
+         * 遗忘曲线复习系统
+         * 艾宾浩斯间隔：复习次数 0→1天, 1→2天, 2→4天, 3→7天, 4+→15天
+         * 弹窗时机：①有错题到期复习 ②错题累计达阈值(10道)
+         * 出题：基于错题知识点，难度+2封顶10，全新选择题
+         * 做完后：答对的错题建议删除（用户确认），答错的保留并重置间隔
+         * ================================================================ */
+        var WQ_REVIEW_INTERVALS = [1, 2, 4, 7, 15]; /* 天，按 reviewCount 取 */
+        var WQ_REVIEW_COUNT_THRESHOLD = 10;         /* 错题累计达此数也提醒复习 */
+        var _wqReviewDueItems = [];                 /* 当前到期复习的错题 */
+        var _wqReviewQuiz = null;                   /* 当前复习测验数据 */
+
+        /* 计算某道错题下一次复习间隔（毫秒） */
+        function wqReviewIntervalMs(item) {
+            var rc = Math.min(item.reviewCount || 0, WQ_REVIEW_INTERVALS.length - 1);
+            return WQ_REVIEW_INTERVALS[rc] * 24 * 3600 * 1000;
+        }
+        /* 获取到期复习的错题列表 */
+        function getWQReviewDue() {
+            var list = getWQ();
+            var now = Date.now();
+            var due = [];
+            for (var i = 0; i < list.length; i++) {
+                var it = list[i];
+                var base = it.lastReviewedAt || it.atTs;
+                if (!base) continue;
+                if (now - base >= wqReviewIntervalMs(it)) due.push(it);
+            }
+            return due;
+        }
+        /* 页面加载时检查是否需要弹出复习提醒 */
+        function checkWQReview() {
+            var list = getWQ();
+            var due = getWQReviewDue();
+            /* 触发条件：有到期复习题，或错题总数达阈值且距上次提醒超过1天 */
+            var lastPrompt = parseInt(localStorage.getItem("wq_review_last_prompt") || "0", 10);
+            var oneDay = 24 * 3600 * 1000;
+            if (due.length > 0 || (list.length >= WQ_REVIEW_COUNT_THRESHOLD && Date.now() - lastPrompt > oneDay)) {
+                _wqReviewDueItems = due.length ? due : list.slice(0, WQ_REVIEW_COUNT_THRESHOLD);
+                localStorage.setItem("wq_review_last_prompt", String(Date.now()));
+                setTimeout(showWQReviewPrompt, 1200);
+            }
+        }
+        /* 复习提醒弹窗 */
+        function showWQReviewPrompt() {
+            var cnt = _wqReviewDueItems.length;
+            if (!cnt) return;
+            var old = document.getElementById("wqReviewPromptMask");
+            if (old) old.remove();
+            var mask = document.createElement("div");
+            mask.id = "wqReviewPromptMask";
+            mask.style.cssText = "position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:99998;display:flex;align-items:center;justify-content:center;padding:20px";
+            mask.innerHTML =
+                '<div style="background:#fff;border-radius:14px;max-width:420px;width:100%;padding:22px;box-shadow:0 10px 40px rgba(0,0,0,.25)">' +
+                    '<div style="font-size:20px;font-weight:700;color:#1e293b;margin-bottom:8px">🧠 该复习错题啦</div>' +
+                    '<div style="font-size:13px;line-height:1.7;color:#475569;margin-bottom:16px">' +
+                        '根据艾宾浩斯遗忘曲线，你有 <b style="color:#dc2626">' + cnt + '</b> 道错题到了复习时间点。<br>' +
+                        '系统将基于这些错题的知识点，出一套<b>全新的选择题</b>（难度比原题拔高2级，最高10级），帮你检验是否真正掌握。' +
+                    '</div>' +
+                    '<div style="display:flex;gap:10px">' +
+                        '<button type="button" id="wqReviewStartBtn" style="flex:1;padding:11px;background:#dc2626;color:#fff;border:none;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer">开始复习</button>' +
+                        '<button type="button" id="wqReviewLaterBtn" style="flex:1;padding:11px;background:#f1f5f9;color:#334155;border:none;border-radius:8px;font-size:14px;cursor:pointer">稍后再说</button>' +
+                    '</div>' +
+                '</div>';
+            document.body.appendChild(mask);
+            document.getElementById("wqReviewStartBtn").onclick = function () { mask.remove(); startWQReviewQuiz(); };
+            document.getElementById("wqReviewLaterBtn").onclick = function () { mask.remove(); showToast("好的，稍后再提醒你复习"); };
+        }
+        /* 开始复习测验：调用AI生成选择题 */
+        function startWQReviewQuiz() {
+            var items = _wqReviewDueItems;
+            if (!items || !items.length) { showToast("暂无需复习的错题"); return; }
+            /* 收集知识点和学科，去重 */
+            var subSet = {}, kpSet = {};
+            var maxDiff = 0;
+            items.forEach(function (it) {
+                if (it.subject) subSet[it.subject] = true;
+                (it.kps || []).forEach(function (k) { kpSet[k] = true; });
+                if (it.diff) maxDiff = Math.max(maxDiff, it.diff);
+            });
+            var subjects = Object.keys(subSet);
+            var kps = Object.keys(kpSet);
+            var targetDiff = Math.min(10, (maxDiff || 5) + 2);  /* 难度+2，封顶10 */
+            /* 打开测验弹窗，显示加载中 */
+            showWQReviewQuizModal(true);
+            /* 调用AI生成选择题 */
+            if (WQ_AI_CONFIG.enabled && enabledProviders().length) {
+                aiGenerateReviewQuiz(subjects, kps, targetDiff, items.length, function (err, quiz) {
+                    if (err || !quiz || !quiz.questions || !quiz.questions.length) {
+                        showWQReviewQuizError("生成复习题失败，请稍后重试");
+                        return;
+                    }
+                    _wqReviewQuiz = { questions: quiz.questions, sourceItems: items, answers: [], current: 0 };
+                    renderWQReviewQuizQuestion();
+                });
+            } else {
+                showWQReviewQuizError("AI未启用，无法生成复习题");
+            }
+        }
+        /* AI生成复习选择题 */
+        function aiGenerateReviewQuiz(subjects, kps, diff, count, cb) {
+            var subj = (subjects && subjects.length) ? subjects.join("、") : "综合";
+            var kpList = (kps && kps.length) ? kps.join("、") : "相关知识点";
+            var n = Math.min(8, Math.max(3, count));
+            var sysPrompt = "你是一位出题专家。请基于以下知识点，生成 " + n + " 道全新的单项选择题（不要复用任何已有题目）。" +
+                "难度等级 " + diff + "（1-10级，数字越大越难）。" +
+                "严格按JSON返回：{\"questions\":[{\"q\":\"题干\",\"options\":[\"A选项\",\"B选项\",\"C选项\",\"D选项\"],\"answer\":0,\"explain\":\"解析\"}]}。" +
+                "answer为正确选项的索引(0-3)。题干和选项要具体、有区分度，不要空话。";
+            var messages = [
+                { role: "system", content: sysPrompt },
+                { role: "user", content: "学科：" + subj + "\n知识点：" + kpList + "\n请出题。" }
+            ];
+            WQ_AI_ROUTER.call(messages, "pipeline", function (err, res) {
+                if (err) { cb(err, null); return; }
+                try {
+                    var raw = res.text;
+                    var m = raw.match(/\{[\s\S]*\}/);
+                    var obj = m ? JSON.parse(m[0]) : null;
+                    if (obj && Array.isArray(obj.questions) && obj.questions.length) {
+                        obj.questions = obj.questions.filter(function (q) {
+                            return q.q && Array.isArray(q.options) && q.options.length === 4 && q.answer >= 0 && q.answer <= 3;
+                        });
+                        cb(null, obj);
+                    } else { cb(new Error("parse_failed"), null); }
+                } catch (e) { cb(e, null); }
+            });
+        }
+        /* 复习测验弹窗 */
+        function showWQReviewQuizModal(loading) {
+            var old = document.getElementById("wqReviewQuizMask");
+            if (old) old.remove();
+            var mask = document.createElement("div");
+            mask.id = "wqReviewQuizMask";
+            mask.style.cssText = "position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:99999;display:flex;align-items:center;justify-content:center;padding:16px";
+            mask.innerHTML =
+                '<div style="background:#fff;border-radius:14px;max-width:560px;width:100%;max-height:90vh;display:flex;flex-direction:column;overflow:hidden">' +
+                    '<div style="padding:14px 18px;background:#dc2626;color:#fff;display:flex;justify-content:space-between;align-items:center">' +
+                        '<b>🧠 错题复习测验</b>' +
+                        '<button type="button" id="wqQuizClose" style="background:none;border:none;color:#fff;font-size:18px;cursor:pointer">✕</button>' +
+                    '</div>' +
+                    '<div id="wqQuizBody" style="flex:1;overflow-y:auto;padding:18px">' +
+                        (loading ? '<div style="text-align:center;color:#64748b;padding:40px">⏳ 正在为你生成复习题…</div>' : '') +
+                    '</div>' +
+                '</div>';
+            document.body.appendChild(mask);
+            document.getElementById("wqQuizClose").onclick = function () {
+                if (confirm("确定退出复习测验？进度将不保存")) {
+                    _wqReviewQuiz = null;
+                    mask.remove();
+                }
+            };
+        }
+        function showWQReviewQuizError(msg) {
+            var body = document.getElementById("wqQuizBody");
+            if (body) body.innerHTML = '<div style="text-align:center;color:#dc2626;padding:40px">' + msg + '</div>';
+        }
+        /* 渲染当前题目 */
+        function renderWQReviewQuizQuestion() {
+            var quiz = _wqReviewQuiz;
+            if (!quiz) return;
+            var body = document.getElementById("wqQuizBody");
+            if (!body) return;
+            var q = quiz.questions[quiz.current];
+            var total = quiz.questions.length;
+            var html = '<div style="margin-bottom:12px;font-size:13px;color:#64748b">第 ' + (quiz.current + 1) + ' / ' + total + ' 题</div>' +
+                '<div style="font-size:15px;font-weight:600;color:#1e293b;line-height:1.6;margin-bottom:16px">' + renderMath(q.q) + '</div>' +
+                '<div style="display:flex;flex-direction:column;gap:8px">';
+            for (var i = 0; i < q.options.length; i++) {
+                var letter = String.fromCharCode(65 + i);
+                html += '<button type="button" class="wq-quiz-opt" data-idx="' + i + '" style="text-align:left;padding:12px 14px;border:1px solid #e2e8f0;border-radius:8px;background:#fff;cursor:pointer;font-size:14px;color:#334155;transition:all .15s">' +
+                    '<b style="color:#dc2626;margin-right:8px">' + letter + '.</b>' + renderMath(q.options[i]) + '</button>';
+            }
+            html += '</div>';
+            body.innerHTML = html;
+            body.querySelectorAll(".wq-quiz-opt").forEach(function (btn) {
+                btn.addEventListener("mouseenter", function () { btn.style.borderColor = "#dc2626"; btn.style.background = "#fef2f2"; });
+                btn.addEventListener("mouseleave", function () { btn.style.borderColor = "#e2e8f0"; btn.style.background = "#fff"; });
+                btn.addEventListener("click", function () {
+                    var idx = parseInt(btn.getAttribute("data-idx"));
+                    quiz.answers[quiz.current] = idx;
+                    /* 高亮选中 */
+                    body.querySelectorAll(".wq-quiz-opt").forEach(function (b) {
+                        b.style.borderColor = "#e2e8f0"; b.style.background = "#fff";
+                    });
+                    btn.style.borderColor = "#dc2626"; btn.style.background = "#fee2e2";
+                    /* 0.5秒后进入下一题 */
+                    setTimeout(function () {
+                        quiz.current++;
+                        if (quiz.current >= total) finishWQReviewQuiz();
+                        else renderWQReviewQuizQuestion();
+                    }, 400);
+                });
+            });
+        }
+        /* 完成测验，展示结果并建议删除 */
+        function finishWQReviewQuiz() {
+            var quiz = _wqReviewQuiz;
+            if (!quiz) return;
+            var body = document.getElementById("wqQuizBody");
+            if (!body) return;
+            var correct = 0;
+            for (var i = 0; i < quiz.questions.length; i++) {
+                if (quiz.answers[i] === quiz.questions[i].answer) correct++;
+            }
+            var total = quiz.questions.length;
+            var pct = Math.round(correct / total * 100);
+            /* 判断哪些源错题可以删除：正确率>=60%则建议删除对应错题 */
+            var canDelete = pct >= 60;
+            var html = '<div style="text-align:center;margin-bottom:18px">' +
+                '<div style="font-size:42px;font-weight:800;color:' + (pct >= 60 ? "#16a34a" : "#dc2626") + '">' + correct + ' / ' + total + '</div>' +
+                '<div style="font-size:14px;color:#64748b">正确率 ' + pct + '%</div>' +
+                '</div>';
+            /* 逐题解析 */
+            html += '<div style="margin-bottom:16px">';
+            for (var j = 0; j < total; j++) {
+                var qq = quiz.questions[j];
+                var ua = quiz.answers[j];
+                var ok = ua === qq.answer;
+                html += '<div style="padding:10px 12px;background:' + (ok ? "#f0fdf4" : "#fef2f2") + ';border:1px solid ' + (ok ? "#bbf7d0" : "#fecaca") + ';border-radius:8px;margin-bottom:8px;font-size:13px">' +
+                    '<div style="font-weight:600;margin-bottom:4px">' + (ok ? "✅" : "❌") + ' ' + esc(qq.q).slice(0, 80) + '</div>' +
+                    '<div style="color:#64748b">你的答案：' + String.fromCharCode(65 + (ua != null ? ua : -1)) + ' · 正确答案：' + String.fromCharCode(65 + qq.answer) + '</div>' +
+                    (qq.explain ? '<div style="color:#475569;margin-top:4px">解析：' + esc(qq.explain).slice(0, 120) + '</div>' : '') +
+                    '</div>';
+            }
+            html += '</div>';
+            /* 删除建议 */
+            if (canDelete) {
+                html += '<div style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;padding:12px;margin-bottom:14px">' +
+                    '<div style="font-size:13px;color:#166534;margin-bottom:8px">🎉 正确率达标！以下 ' + quiz.sourceItems.length + ' 道错题你已掌握，可以从错题本移除：</div>';
+                quiz.sourceItems.forEach(function (it) {
+                    html += '<div style="display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid #dcfce7;font-size:13px">' +
+                        '<span style="color:#334155;flex:1;margin-right:8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + esc(it.text).slice(0, 50) + '</span>' +
+                        '<button type="button" class="wq-review-del" data-id="' + it.id + '" style="padding:4px 10px;background:#16a34a;color:#fff;border:none;border-radius:5px;cursor:pointer;font-size:12px;flex-shrink:0">移除</button>' +
+                        '</div>';
+                });
+                html += '</div>';
+            } else {
+                html += '<div style="background:#fef2f2;border:1px solid #fecaca;border-radius:8px;padding:12px;margin-bottom:14px;font-size:13px;color:#991b1b">' +
+                    '正确率未达标，这些错题还需要继续复习。系统会按遗忘曲线在下次间隔再次提醒你。' +
+                    '</div>';
+            }
+            html += '<button type="button" id="wqQuizFinishBtn" style="width:100%;padding:11px;background:#1f2937;color:#fff;border:none;border-radius:8px;font-size:14px;cursor:pointer">完成</button>';
+            body.innerHTML = html;
+            /* 绑定删除按钮 */
+            body.querySelectorAll(".wq-review-del").forEach(function (b) {
+                b.addEventListener("click", function () {
+                    var id = Number(b.getAttribute("data-id"));
+                    var newList = getWQ().filter(function (r) { return r.id !== id; });
+                    saveWQ(newList);
+                    b.textContent = "✅ 已移除";
+                    b.disabled = true;
+                    b.style.background = "#9ca3af";
+                });
+            });
+            document.getElementById("wqQuizFinishBtn").onclick = function () {
+                /* 更新错题复习记录 */
+                var list = getWQ();
+                var idSet = {};
+                quiz.sourceItems.forEach(function (it) { idSet[it.id] = true; });
+                for (var k = 0; k < list.length; k++) {
+                    if (idSet[list[k].id]) {
+                        if (canDelete) {
+                            /* 答对了：复习次数+1，更新复习时间（即使用户没删，也延长间隔） */
+                            list[k].reviewCount = (list[k].reviewCount || 0) + 1;
+                            list[k].lastReviewedAt = Date.now();
+                        } else {
+                            /* 答错了：重置复习次数，缩短间隔 */
+                            list[k].reviewCount = 0;
+                            list[k].lastReviewedAt = Date.now();
+                        }
+                    }
+                }
+                saveWQ(list);
+                _wqReviewQuiz = null;
+                document.getElementById("wqReviewQuizMask").remove();
+                showToast("复习完成！已更新错题复习记录");
+            };
         }
 
         function clearWQ() {
@@ -11055,10 +11587,10 @@ var currentIndoorBld = null;   // 当前进入楼内导航的楼栋（BUILDINGS 
                                 applyMyPos({ lng: ll[0], lat: ll[1] }, p.coords.accuracy, showFeedback);
                             }
                         }, function (err) {
-                            geoFail(showFeedback, (result && result.info) || err.message);
+                            geoFail(showFeedback, (result && result.info) || err.message, err && err.code);
                         }, { enableHighAccuracy: true, timeout: 10000, maximumAge: 5000 });
                     } else {
-                        geoFail(showFeedback, (result && result.info) || "未知原因");
+                        geoFail(showFeedback, (result && result.info) || "未知原因", result && result.info === "Geolocation permission denied." ? 1 : 0);
                     }
                 });
                 return;
@@ -11069,21 +11601,63 @@ var currentIndoorBld = null;   // 当前进入楼内导航的楼栋（BUILDINGS 
                 navigator.geolocation.getCurrentPosition(function (p) {
                     applyMyPos({ lng: p.coords.longitude, lat: p.coords.latitude }, p.coords.accuracy, showFeedback);
                 }, function (err) {
-                    geoFail(showFeedback, err.message);
+                    geoFail(showFeedback, err.message, err && err.code);
                 }, { enableHighAccuracy: true, timeout: 10000, maximumAge: 5000 });
             } else {
                 if (showFeedback) showToast("无法定位；可点地图任意处或预设起点");
                 enterManualStart("当前环境不支持定位。请点地图任意位置，或选择下方预设起点作为出发地；也可点『用高德App导航』。");
             }
         }
-        function geoFail(showFeedback, why) {
+        function geoFail(showFeedback, why, errCode) {
             // 已有起点时，迟到的定位失败不覆盖已选起点/已画路线
             if (myPos || myPosLocked) {
                 if (showFeedback) showToast("定位失败（" + why + "），仍使用当前所选起点");
                 return;
             }
+            // errCode === 1：用户拒绝了定位权限（浏览器会记住该决定，需手动恢复）
+            if (errCode === 1 || /denied|permission/i.test(why || "")) {
+                if (showFeedback) {
+                    showGeoPermissionGuide();
+                } else {
+                    enterManualStart("定位权限被拒绝。可点地图任意位置设起点，或点「📍我的位置」重试并按指引恢复权限。");
+                }
+                return;
+            }
             if (showFeedback) showToast("定位失败：" + why);
             enterManualStart("未能获取定位（" + why + "）。请点地图任意位置，或选择下方预设起点作为出发地；也可点『用高德App导航』。");
+        }
+        /* 定位权限被拒时的恢复指引弹窗：告诉用户如何在浏览器里重新授权 */
+        var _geoGuideShown = false;
+        function showGeoPermissionGuide() {
+            if (_geoGuideShown) return;
+            _geoGuideShown = true;
+            var mask = document.createElement("div");
+            mask.id = "geoPermGuideMask";
+            mask.style.cssText = "position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:100000;display:flex;align-items:center;justify-content:center;padding:20px";
+            mask.innerHTML =
+                '<div style="background:#fff;border-radius:14px;max-width:420px;width:100%;padding:22px;box-shadow:0 10px 40px rgba(0,0,0,.25)">' +
+                    '<div style="font-size:18px;font-weight:700;color:#1e293b;margin-bottom:10px">📍 定位权限被关闭了</div>' +
+                    '<div style="font-size:13px;line-height:1.7;color:#475569;margin-bottom:14px">' +
+                        '浏览器已记住「拒绝定位」，需要你手动恢复一次，之后就能正常定位：<br>' +
+                        '<b>手机</b>：点地址栏左侧的 🔒 图标 → 「网站设置」→「位置信息」改为「允许」<br>' +
+                        '<b>电脑</b>：点地址栏左侧的 🔒 或 ⓘ 图标 → 「网站设置」→「位置」改为「允许」<br>' +
+                        '改完后刷新页面即可。' +
+                    '</div>' +
+                    '<div style="display:flex;gap:10px">' +
+                        '<button type="button" id="geoGuideRetry" style="flex:1;padding:10px;background:#2563eb;color:#fff;border:none;border-radius:8px;font-size:14px;cursor:pointer">🔄 我已改好，重试定位</button>' +
+                        '<button type="button" id="geoGuideManual" style="flex:1;padding:10px;background:#f1f5f9;color:#334155;border:none;border-radius:8px;font-size:14px;cursor:pointer">先用手动选点</button>' +
+                    '</div>' +
+                '</div>';
+            document.body.appendChild(mask);
+            document.getElementById("geoGuideRetry").onclick = function () {
+                mask.remove(); _geoGuideShown = false;
+                locateMe(true);
+            };
+            document.getElementById("geoGuideManual").onclick = function () {
+                mask.remove(); _geoGuideShown = false;
+                enterManualStart("可点地图任意位置设起点，或选择预设起点；恢复定位权限后点「📍我的位置」即可。");
+            };
+            enterManualStart("定位权限被拒绝，点击上方按钮按指引恢复，或直接用手动选点。");
         }
         // 定位成功统一入口：蓝点上图 + 起点 chips 选中 + 触发路线规划 + 开启实时跟踪
         function applyMyPos(pos, accuracy, showFeedback) {
@@ -13373,21 +13947,50 @@ var currentIndoorBld = null;   // 当前进入楼内导航的楼栋（BUILDINGS 
             var wqBankSearch = document.getElementById("wqBankSearch");
             if (wqBankSearch) wqBankSearch.addEventListener("input", function () { renderBankList(wqBankSearch.value); });
             var wqBankAdminBtn = document.getElementById("wqBankAdminBtn");
+            var wqBankPwdRow = document.getElementById("wqBankPwdRow");
+            var wqBankPwdInput = document.getElementById("wqBankPwdInput");
+            var wqBankMonitorBtn = document.getElementById("wqBankMonitorBtn");
+            var wqBankMonitorPanel = document.getElementById("wqBankMonitorPanel");
+            var wqBankMonitorRefresh = document.getElementById("wqBankMonitorRefresh");
+            function refreshBankAdminUI() {
+                if (isBankAdmin()) {
+                    wqBankAdminBtn.textContent = "✅ 管理员（退出）";
+                    wqBankAdminBtn.style.background = "#0f766e";
+                    if (wqBankPwdRow) wqBankPwdRow.style.display = "none";
+                    if (wqBankPwdInput) wqBankPwdInput.value = "";
+                    if (wqBankMonitorBtn) wqBankMonitorBtn.style.display = "inline-block";
+                } else {
+                    wqBankAdminBtn.textContent = "🔑 管理员登录";
+                    wqBankAdminBtn.style.background = "#1f2937";
+                    if (wqBankMonitorBtn) wqBankMonitorBtn.style.display = "none";
+                    if (wqBankMonitorPanel) wqBankMonitorPanel.style.display = "none";
+                }
+            }
+            if (wqBankMonitorBtn) wqBankMonitorBtn.addEventListener("click", toggleBankMonitor);
+            if (wqBankMonitorRefresh) wqBankMonitorRefresh.addEventListener("click", loadBankMonitor);
             if (wqBankAdminBtn) wqBankAdminBtn.addEventListener("click", function () {
                 if (isBankAdmin()) {
                     localStorage.removeItem("wq_bank_admin");
-                    wqBankAdminBtn.textContent = "🔑 管理员登录";
+                    refreshBankAdminUI();
                     renderBankList(wqBankSearch ? wqBankSearch.value : "");
                     showToast("已退出管理员");
                 } else {
-                    var pwd = prompt("请输入管理员密码：");
-                    if (pwd === WQ_BANK_ADMIN_PWD) {
+                    if (wqBankPwdRow) {
+                        wqBankPwdRow.style.display = "block";
+                        if (wqBankPwdInput) { wqBankPwdInput.value = ""; wqBankPwdInput.focus(); }
+                    }
+                }
+            });
+            if (wqBankPwdInput) wqBankPwdInput.addEventListener("keydown", function (e) {
+                if (e.key === "Enter") {
+                    if (wqBankPwdInput.value === WQ_BANK_ADMIN_PWD) {
                         localStorage.setItem("wq_bank_admin", "1");
-                        wqBankAdminBtn.textContent = "✅ 管理员（点击退出）";
+                        refreshBankAdminUI();
                         renderBankList(wqBankSearch ? wqBankSearch.value : "");
                         showToast("✅ 管理员登录成功，可删除题库题目");
-                    } else if (pwd !== null) {
+                    } else {
                         showToast("❌ 密码错误");
+                        wqBankPwdInput.value = "";
                     }
                 }
             });
@@ -13399,6 +14002,14 @@ var currentIndoorBld = null;   // 当前进入楼内导航的楼栋（BUILDINGS 
             if (wqSave) wqSave.addEventListener("click", saveWQItem);
             var wqClear = document.getElementById("wqClearBtn");
             if (wqClear) wqClear.addEventListener("click", clearWQ);
+            var wqReviewBtn = document.getElementById("wqReviewBtn");
+            if (wqReviewBtn) wqReviewBtn.addEventListener("click", function () {
+                var list = getWQ();
+                if (!list.length) { showToast("还没有错题，先录入一些吧"); return; }
+                var due = getWQReviewDue();
+                _wqReviewDueItems = due.length ? due : list;
+                showWQReviewPrompt();
+            });
             var wqRetry = document.getElementById("wqAiRetry");
             if (wqRetry) wqRetry.addEventListener("click", runWQRecognize);
             /* 题目输入公式实时预览 */
@@ -13458,6 +14069,9 @@ var currentIndoorBld = null;   // 当前进入楼内导航的楼栋（BUILDINGS 
                     syncSharedBank();
                 }
             } catch (e) { console.warn("Pipeline B init failed:", e); }
+
+            /* 遗忘曲线复习检查：有到期错题或累计达阈值时弹窗提醒 */
+            try { if (typeof checkWQReview === "function") checkWQReview(); } catch (e) { /* 忽略 */ }
 
             /* ---- 开发者模式：URL ?dev=1 显示题库后台 + AI 配置入口 ---- */
             try {
@@ -16837,6 +17451,7 @@ body.fire-mode #fireOverlay{display:flex}
     <div class="fb-list-items" id="wqListItems"></div>
     <div class="fb-list-actions">
       <button type="button" class="wq-btn wq-btn-add" id="wqAddBtn">➕ 录入新错题</button>
+      <button type="button" id="wqReviewBtn" style="padding:8px 16px;background:#dc2626;color:#fff;border:none;border-radius:8px;font-size:13px;cursor:pointer">🧠 遗忘曲线复习</button>
       <button type="button" class="fb-clear" id="wqClearBtn">清空全部</button>
     </div>
   </div>
@@ -16849,9 +17464,25 @@ body.fire-mode #fireOverlay{display:flex}
     <button type="button" class="fb-modal-close" data-close-wqbank aria-label="关闭">✕</button>
     <div class="fb-list-title">📚 题库浏览</div>
     <div class="fb-list-summary" id="wqBankSummary"></div>
-    <div style="padding:0 16px 8px;display:flex;gap:8px;align-items:center">
-      <input type="text" id="wqBankSearch" placeholder="搜索题目内容/学科/知识点…" style="flex:1;padding:8px 12px;border:1px solid #e2e8f0;border-radius:8px;font-size:13px;outline:none">
-      <button type="button" id="wqBankAdminBtn" style="padding:8px 14px;background:#1f2937;color:#fff;border:none;border-radius:8px;font-size:13px;cursor:pointer;white-space:nowrap">🔑 管理员登录</button>
+    <div style="padding:0 16px 8px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+      <input type="text" id="wqBankSearch" placeholder="搜索题目内容/学科/知识点…" style="flex:1;min-width:160px;padding:8px 12px;border:1px solid #e2e8f0;border-radius:8px;font-size:13px;outline:none">
+      <div id="wqBankAdminArea" style="display:flex;gap:6px;align-items:center">
+        <button type="button" id="wqBankAdminBtn" style="padding:8px 14px;background:#1f2937;color:#fff;border:none;border-radius:8px;font-size:13px;cursor:pointer;white-space:nowrap">🔑 管理员登录</button>
+        <button type="button" id="wqBankMonitorBtn" style="display:none;padding:8px 14px;background:#7c3aed;color:#fff;border:none;border-radius:8px;font-size:13px;cursor:pointer;white-space:nowrap">📊 动向监控</button>
+      </div>
+    </div>
+    <div id="wqBankPwdRow" style="display:none;padding:0 16px 8px">
+      <input type="password" id="wqBankPwdInput" placeholder="输入管理员密码后回车" style="flex:1;padding:8px 12px;border:1px solid #e2e8f0;border-radius:8px;font-size:13px;outline:none;width:100%">
+    </div>
+    <!-- 开发者动向监控面板（仅管理员可见） -->
+    <div id="wqBankMonitorPanel" style="display:none;padding:0 16px 12px">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+        <b style="font-size:14px;color:#7c3aed">📊 题库动向监控</b>
+        <button type="button" id="wqBankMonitorRefresh" style="padding:4px 10px;background:#eef2ff;color:#4f46e5;border:none;border-radius:6px;font-size:12px;cursor:pointer">🔄 刷新</button>
+      </div>
+      <div id="wqBankMonitorBody" style="font-size:12px;color:#475569;max-height:40vh;overflow-y:auto;background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:10px">
+        加载中…
+      </div>
     </div>
     <div class="fb-list-items" id="wqBankItems" style="max-height:60vh"></div>
   </div>

@@ -146,6 +146,18 @@ async function saveBank(KV, bank) {
   }));
 }
 
+/* 追加 Cron 运行记录到 wq_bank_cron_log（最多保留 50 条，供开发者监控） */
+async function pushCronLog(KV, run) {
+  try {
+    var raw = await KV.get("wq_bank_cron_log");
+    var arr = raw ? JSON.parse(raw) : [];
+    if (!Array.isArray(arr)) arr = [];
+    arr.unshift(run);
+    if (arr.length > 50) arr = arr.slice(0, 50);
+    await KV.put("wq_bank_cron_log", JSON.stringify(arr));
+  } catch (e) { /* ignore */ }
+}
+
 function countBank(bank) {
   var cnt = 0;
   for (var sub in bank) {
@@ -195,7 +207,7 @@ async function runUpdate(KV) {
 
   if (lacking.length === 0) {
     log.push("所有知识点题量充足，跳过本次更新");
-    await KV.put("wq_bank_log", JSON.stringify({ time: new Date().toISOString(), log: log }));
+    await pushCronLog(KV, { time: new Date().toISOString(), stored: 0, attempted: 0, log: log });
     return log.join("\n");
   }
 
@@ -259,7 +271,7 @@ async function runUpdate(KV) {
 
   await saveBank(KV, bank);
   log.push("完成：尝试 " + attempted + " 道，新入库 " + stored + " 道，题库总计 " + countBank(bank) + " 题");
-  await KV.put("wq_bank_log", JSON.stringify({ time: new Date().toISOString(), log: log }));
+  await pushCronLog(KV, { time: new Date().toISOString(), stored: stored, attempted: attempted, log: log });
   return log.join("\n");
 }
 
@@ -295,11 +307,13 @@ export default {
     if (path === "/bank/stats" || path === "/api/bank/stats") {
       var b = await loadBank(env.WQ_BANK_KV);
       var meta = await env.WQ_BANK_KV.get("wq_bank_meta");
-      var logRaw = await env.WQ_BANK_KV.get("wq_bank_log");
+      var userLogRaw = await env.WQ_BANK_KV.get("wq_bank_log");
+      var cronLogRaw = await env.WQ_BANK_KV.get("wq_bank_cron_log");
       return new Response(JSON.stringify({
         total: countBank(b),
         meta: meta ? JSON.parse(meta) : null,
-        lastLog: logRaw ? JSON.parse(logRaw) : null
+        userSubmissions: userLogRaw ? JSON.parse(userLogRaw) : [],
+        cronRuns: cronLogRaw ? JSON.parse(cronLogRaw) : []
       }), { headers: corsHeaders });
     }
 
