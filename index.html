@@ -8447,12 +8447,12 @@ var IndoorRouter = (function () {
             var markers = [];
             s = s.replace(/\[IMG:([^\]]+)\]/g, function (_, desc) {
                 markers.push(desc);
-                return "\x00IMG" + (markers.length - 1) + "\x00";
+                return "\x00IMG~" + (markers.length - 1) + "~\x00";
             });
             /* 先渲染数学公式 */
             s = renderMath(s);
             /* 替换占位符为配图（带缓存+加载状态） */
-            s = s.replace(/\x00IMG(\d+)\x00/g, function (_, i) {
+            s = s.replace(/\x00IMG~(\d+)~\x00/g, function (_, i) {
                 var desc = markers[parseInt(i)] || "";
                 return imgDiagramHTML(desc, { subject: subject, width: 520, height: 360 });
             });
@@ -8488,7 +8488,8 @@ var IndoorRouter = (function () {
             var protectedParts = [];
             s = s.replace(/\$\$[\s\S]+?\$\$|\\\[[\s\S]+?\\\]|\\\([\s\S]+?\\\)|\$[^$\n]+\$/g, function (m) {
                 protectedParts.push(m);
-                return "\x00MATH" + (protectedParts.length - 1) + "\x00";
+                /* ~ 分隔符：断字母-数字相邻，避免被变量+数字规则改写为 MATH_{0} */
+                return "\x00MATH~" + (protectedParts.length - 1) + "~\x00";
             });
             /* ② Unicode 上下标转 LaTeX：连续下标合并为 _{...}，连续上标合并为 ^{...} */
             var subMap = { "₀":"0","₁":"1","₂":"2","₃":"3","₄":"4","₅":"5","₆":"6","₇":"7","₈":"8","₉":"9",
@@ -8528,7 +8529,7 @@ var IndoorRouter = (function () {
                 return lead + "$" + wrapped + "$" + trail;
             });
             /* ④ 还原保护的数学块 */
-            s = s.replace(/\x00MATH(\d+)\x00/g, function (_, i) {
+            s = s.replace(/\x00MATH~(\d+)~\x00/g, function (_, i) {
                 return protectedParts[parseInt(i)];
             });
             return s;
@@ -9135,13 +9136,18 @@ var IndoorRouter = (function () {
             }, 90000);
             try {
                 _wqTimeSensitive = q.timeSensitive === true;
+                var _mExplRaf = null;
+                var flushMExpl = function () {
+                    _mExplRaf = null;
+                    if (idx === _wqActiveMultiIdx) {
+                        var explBox = document.getElementById("wqAiExplainBox");
+                        if (explBox) explBox.innerHTML = '<div style="background:#f5f3ff;border:1px solid #ddd6fe;border-radius:8px;padding:10px 12px;margin-top:8px"><b style="color:#6d28d9">📖 讲解</b><div style="white-space:pre-wrap;font-size:13px;line-height:1.7;color:#1e293b;margin-top:6px">' + renderDiagramMarkers(q.explain || "", q.subject) + '</div></div>';
+                    }
+                };
                 aiFullPipeline(q.text, q.subject, q.kps, q.diff, {
                 onExplain: function (text) {
                     q.explain = text;
-                    if (idx === _wqActiveMultiIdx) {
-                        var explBox = document.getElementById("wqAiExplainBox");
-                        if (explBox) explBox.innerHTML = '<div style="background:#f5f3ff;border:1px solid #ddd6fe;border-radius:8px;padding:10px 12px;margin-top:8px"><b style="color:#6d28d9">📖 讲解</b><div style="white-space:pre-wrap;font-size:13px;line-height:1.7;color:#1e293b;margin-top:6px">' + renderDiagramMarkers(text || "", q.subject) + '</div></div>';
-                    }
+                    if (_mExplRaf == null) _mExplRaf = requestAnimationFrame(flushMExpl);
                 },
                 onMother: function (m) {
                     q.mother = m;
@@ -9161,6 +9167,7 @@ var IndoorRouter = (function () {
                     if (idx === _wqActiveMultiIdx && window._paintRecs) window._paintRecs(recs);
                 },
                 onDone: function () {
+                    if (_mExplRaf != null) { cancelAnimationFrame(_mExplRaf); _mExplRaf = null; flushMExpl(); }
                     if (done) return;
                     done = true;
                     clearTimeout(safetyTimer);
@@ -9847,18 +9854,26 @@ var IndoorRouter = (function () {
                 var needSearch = _wqTimeSensitive === true;
                 var runPipeline = function (searchCtx) {
                     try {
-                        aiFullPipeline(origText, sub, _wqKps, origDiff, {
-                        /* ① 讲解：流式逐字渲染，首字秒级呈现 */
-                        onExplain: function (text) {
+                        /* 流式讲解渲染：rAF 节流，避免长答案时每帧全文重渲染卡顿 */
+                        var _explText = "", _explRaf = null;
+                        var flushExplain = function () {
+                            _explRaf = null;
                             if (explainWatchdog) { clearTimeout(explainWatchdog); explainWatchdog = null; }
                             var explBox = document.getElementById("wqAiExplainBox");
                             if (explBox) {
                                 explBox.innerHTML = '<div style="background:#f5f3ff;border:1px solid #ddd6fe;border-radius:8px;padding:10px 12px;margin-top:8px">' +
                                     '<b style="color:#6d28d9">📖 讲解</b>' +
-                                    '<div style="white-space:pre-wrap;font-size:13px;line-height:1.7;color:#1e293b;margin-top:6px">' + renderDiagramMarkers(text || "", sub) + '</div>' +
+                                    '<div style="white-space:pre-wrap;font-size:13px;line-height:1.7;color:#1e293b;margin-top:6px">' + renderDiagramMarkers(_explText || "", sub) + '</div>' +
                                     '</div>';
                             }
-                        },
+                        };
+                        var onExplainCb = function (text) {
+                            _explText = text || "";
+                            if (_explRaf == null) _explRaf = requestAnimationFrame(flushExplain);
+                        };
+                        aiFullPipeline(origText, sub, _wqKps, origDiff, {
+                        /* ① 讲解：流式逐字渲染，首字秒级呈现 */
+                        onExplain: onExplainCb,
                         /* ② 母题溯源：全部由 AI 生成，题库母题已弃用 */
                         onMother: function (m) {
                             var mEl = document.getElementById("wqMother");
@@ -9907,6 +9922,8 @@ var IndoorRouter = (function () {
                             paintRecs(aiRecs.slice(0, 6));
                         },
                         onDone: function (err) {
+                            /* 强制刷新最后一帧渲染，避免末尾内容丢失 */
+                            if (_explRaf != null) { cancelAnimationFrame(_explRaf); _explRaf = null; flushExplain(); }
                             if (explainWatchdog) { clearTimeout(explainWatchdog); explainWatchdog = null; }
                             var explBox = document.getElementById("wqAiExplainBox");
                             if (err) {
@@ -10008,13 +10025,19 @@ var IndoorRouter = (function () {
                     /* 流式输出：首字秒级呈现 */
                     var fullAnswer = "";
                     var done = false;
-                    WQ_AI_ROUTER.callStream(messages, taskType, function (fullText, delta) {
+                    var _qaRaf = null;
+                    var flushQa = function () {
+                        _qaRaf = null;
                         var tempEl = document.getElementById(tempId);
                         if (!tempEl) return;
-                        fullAnswer = fullText || "";
                         tempEl.innerHTML = '<b>A:</b> ' + renderDiagramMarkers(fullAnswer, sub);
                         box.scrollTop = box.scrollHeight;
+                    };
+                    WQ_AI_ROUTER.callStream(messages, taskType, function (fullText, delta) {
+                        fullAnswer = fullText || "";
+                        if (_qaRaf == null) _qaRaf = requestAnimationFrame(flushQa);
                     }, function (err) {
+                        if (_qaRaf != null) { cancelAnimationFrame(_qaRaf); _qaRaf = null; flushQa(); }
                         if (done) return;
                         done = true;
                         var tempEl = document.getElementById(tempId);
@@ -10248,9 +10271,18 @@ var IndoorRouter = (function () {
             }
         }
 
+        var WQ_MAX_ITEMS = 9999;   /* 单用户错题本总量上限 */
         function saveWQItem() {
             var text = (document.getElementById("wqText") || {}).value || "";
             if (!text.trim() && !_wqImg) { showToast("请上传错题图片或输入题目内容"); return; }
+            var list = getWQ();
+            if (list.length >= WQ_MAX_ITEMS) { showToast("⚠ 错题本已达上限 " + WQ_MAX_ITEMS + " 题，请先清理部分错题"); return; }
+            /* 分类上限校验 */
+            var catId = _wqCurAnalysis && _wqCurAnalysis.categoryId ? _wqCurAnalysis.categoryId : null;
+            if (catId) {
+                var catCount = list.filter(function (r) { return r.categoryId === catId; }).length;
+                if (catCount >= WQ_MAX_ITEMS) { showToast("⚠ 该分类已达上限 " + WQ_MAX_ITEMS + " 题"); return; }
+            }
             /* 保存的题目原文：有图片时取 AI 提取的内容，避免把"分析对话"等指令存成题目 */
             var savedText = (_wqOrigText || text).trim();
             /* 保存前：捕获当前完整分析（讲解/母题/推荐），便于错题本再次查看时恢复 */
