@@ -7112,22 +7112,45 @@ var IndoorRouter = (function () {
                 });
             },
 
-            /* 调用单个 Provider —— 通过 Pages Function 代理转发（规避 CORS） */
+            /* 调用单个 Provider —— 通过 Pages Function 代理转发（规避 CORS），
+             * Tencent 跨境失败时自动降级到 Cloudflare Workers AI 内网调用 */
             _callProvider: function (provider, messages, cb, modelOverride) {
-                /* 通过 Cloudflare Pages Function /api/chat 代理，规避浏览器 CORS */
+                var model = modelOverride || provider.model;
+                /* 先尝试 Tencent TokenHub */
                 var url = WQ_AI_CONFIG.proxyEndpoint || "/api/chat";
                 var payload = {
                     endpoint: provider.endpoint,
                     apiKey: provider.apiKey,
-                    model: modelOverride || provider.model,
+                    model: model,
                     messages: messages,
                     reasoning_effort: "none"
                 };
                 var timedOut = false;
                 var timer = setTimeout(function () {
                     timedOut = true;
-                    cb(new Error("timeout"), null);
+                    tryCfFallback();
                 }, WQ_AI_CONFIG.timeout);
+
+                function tryCfFallback() {
+                    if (timedOut) return;
+                    timedOut = true;  /* 防止重复回调 */
+                    clearTimeout(timer);
+                    /* 降级到 Cloudflare Workers AI（内网，无跨境超时） */
+                    fetch("/api/chat-cf", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ model: model, messages: messages })
+                    }).then(function (r) {
+                        if (!r.ok) throw new Error("CF HTTP " + r.status);
+                        return r.json();
+                    }).then(function (data) {
+                        var text = (data && (data.text || data.answer || (data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content))) || "";
+                        if (text) cb(null, { provider: "Cloudflare-AI", text: text, raw: data });
+                        else cb(new Error("cf_empty"), null);
+                    }).catch(function () {
+                        cb(new Error("all_failed"), null);
+                    });
+                }
 
                 fetch(url, {
                     method: "POST",
@@ -7141,11 +7164,12 @@ var IndoorRouter = (function () {
                 }).then(function (data) {
                     if (timedOut) return;
                     var text = (data && (data.text || data.answer || (data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content))) || "";
-                    cb(null, { provider: provider.name, text: text, raw: data });
-                }).catch(function (e) {
+                    if (text) cb(null, { provider: provider.name, text: text, raw: data });
+                    else tryCfFallback();
+                }).catch(function () {
                     if (timedOut) return;
                     clearTimeout(timer);
-                    cb(e, null);
+                    tryCfFallback();
                 });
             },
 
@@ -9297,49 +9321,67 @@ var IndoorRouter = (function () {
                 }
             }
 
-            /* 题库同类题参考：独立相似度 + 知识点重合双重过滤，限数量 */
+            /* 题库同类题参考（强检索）：从全部题库题目中按相似度+知识点重合度排序，始终返回最相关的若干题 */
             var simRefEl = document.getElementById("wqSimilarRef");
             if (simRefEl) {
-                if (origText.trim() && subBank && !isNonStandard && _wqKps && _wqKps.length) {
+                if (origText.trim() && !isNonStandard) {
+                    var allBankQ = (window.WQ_PIPELINE_B && WQ_PIPELINE_B.getAllQuestions) ? WQ_PIPELINE_B.getAllQuestions() : [];
                     var simCands = [];
-                    for (var skp in subBank) {
-                        var sn = subBank[skp];
-                        if (!sn) continue;
-                        /* 知识点重合度：候选题所属知识点须与原题知识点有交集 */
-                        var kpOverlap = _wqKps.indexOf(skp) >= 0;
-                        if (!kpOverlap) continue;
-                        var allQ = (sn.questions || []).concat([sn.mother]).filter(Boolean);
-                        for (var si = 0; si < allQ.length; si++) {
-                            var sq = allQ[si];
-                            var ss = textSim(origText, sq.text);
-                            /* 相似度门槛提高：须有实质相似（>0.45），且非原题本身（<=0.85） */
-                            if (ss > 0.45 && ss <= 0.85) simCands.push({ q: sq, sim: ss, kp: skp });
+                    var kpArr = _wqKps || [];
+                    for (var bi = 0; bi < allBankQ.length; bi++) {
+                        var bq = allBankQ[bi];
+                        if (!bq || !bq.text) continue;
+                        /* 排除与原题几乎相同的题（雷同） */
+                        var ss = textSim(origText, bq.text);
+                        if (ss > 0.88) continue;
+                        /* 知识点重合加分：题库题的 kp 与原题知识点重合 */
+                        var bqKp = bq.kp || "";
+                        var kpHit = 0;
+                        if (bqKp) {
+                            for (var ki = 0; ki < kpArr.length; ki++) {
+                                if (bqKp.indexOf(kpArr[ki]) >= 0 || kpArr[ki].indexOf(bqKp) >= 0) { kpHit++; break; }
+                            }
+                        }
+                        /* 同学科加分 */
+                        var subHit = (bq.subject === sub) ? 1 : 0;
+                        /* 综合分：文本相似度 0.6 + 知识点重合 0.25 + 同学科 0.15 */
+                        var score = ss * 0.6 + (kpHit ? 0.25 : 0) + (subHit ? 0.15 : 0);
+                        /* 只要有一定相关性就纳入（文本相似>0.12 或 知识点重合），再排序取前几 */
+                        if (ss > 0.12 || kpHit) {
+                            simCands.push({ q: bq, sim: ss, score: score, kp: bqKp, subHit: subHit, kpHit: kpHit });
                         }
                     }
-                    simCands.sort(function (a, b) { return b.sim - a.sim; });
-                    simCands = simCands.slice(0, 3);
+                    /* 按综合分降序，取前 5 道 */
+                    simCands.sort(function (a, b) { return b.score - a.score; });
+                    simCands = simCands.slice(0, 5);
                     if (simCands.length) {
                         var sh = '<div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:10px 12px;margin-top:4px">';
-                        sh += '<div style="font-size:12px;color:#64748b;margin-bottom:8px">以下为题库中与原题相似度较高的题目，仅供对照参考（非原题解析）：</div>';
+                        sh += '<div style="font-size:12px;color:#64748b;margin-bottom:8px">📚 以下为题库中与原题最相关的题目（按相似度+知识点匹配排序），可点击查看完整解析：</div>';
                         for (var ci = 0; ci < simCands.length; ci++) {
                             var c = simCands[ci];
-                            sh += '<div style="background:#fff;border:1px solid #e2e8f0;border-radius:6px;padding:8px 10px;margin-bottom:8px">' +
+                            sh += '<div class="wq-bank-ref-card" style="background:#fff;border:1px solid #e2e8f0;border-radius:6px;padding:8px 10px;margin-bottom:8px;cursor:pointer" data-bankref="' + ci + '">' +
                                 '<div style="font-size:13px;color:#1e293b;line-height:1.6">' + esc(c.q.text) + '</div>' +
-                                '<div style="margin-top:4px"><span class="wq-kp-tag small">' + esc(c.kp) + '</span>' +
-                                ' <span style="font-size:11px;color:#94a3b8">相似度 ' + Math.round(c.sim * 100) + '%</span>' +
-                                (c.q.source ? ' <span style="font-size:11px;color:#94a3b8">· ' + esc(c.q.source) + '</span>' : '') +
+                                '<div style="margin-top:4px;display:flex;flex-wrap:wrap;gap:4px;align-items:center">' +
+                                '<span class="wq-kp-tag small">' + esc(c.q.subject || "") + '</span>' +
+                                (c.kp ? '<span class="wq-kp-tag small" style="background:#eef2ff;color:#4338ca">' + esc(c.kp) + '</span>' : '') +
+                                ' <span style="font-size:11px;color:#94a3b8">相关度 ' + Math.round(c.score * 100) + '%</span>' +
+                                (c.kpHit ? ' <span style="font-size:11px;color:#059669">· 知识点匹配</span>' : '') +
                                 '</div>' +
-                                renderSolutionParts(c.q) +
-                                '<button class="wq-toggle-sol" onclick="var s=this.previousElementSibling;s.style.display=s.style.display===\'block\'?\'none\':\'block\';this.textContent=s.style.display===\'block\'?\'▼ 收起\':\'▶ 查看解析\'">▶ 查看解析</button>' +
+                                '<div class="wq-bank-ref-sol" style="display:none;margin-top:8px;padding-top:8px;border-top:1px dashed #e2e8f0">' +
+                                (c.q.answer ? '<div style="font-size:13px;color:#166534;margin-bottom:4px"><b>答案：</b>' + esc(c.q.answer) + '</div>' : '') +
+                                (c.q.solution ? '<div style="font-size:12px;color:#64748b;line-height:1.6">' + esc(c.q.solution) + '</div>' : '') +
+                                (c.q.source ? '<div style="font-size:11px;color:#94a3b8;margin-top:4px">来源：' + esc(c.q.source) + '</div>' : '') +
+                                '</div>' +
+                                '<button class="wq-toggle-sol" style="margin-top:6px" onclick="var s=this.parentElement.querySelector(\'.wq-bank-ref-sol\');s.style.display=s.style.display===\'block\'?\'none\':\'block\';this.textContent=s.style.display===\'block\'?\'▼ 收起解析\':\'▶ 查看答案与解析\'">▶ 查看答案与解析</button>' +
                                 '</div>';
                         }
                         sh += '</div>';
                         simRefEl.innerHTML = sh;
                     } else {
-                        simRefEl.innerHTML = '<div style="font-size:13px;color:#94a3b8;padding:8px 0">题库中暂无与原题高度相似的题目，系统会定期自动从真实分析中搜题入库。</div>';
+                        simRefEl.innerHTML = '<div style="font-size:13px;color:#94a3b8;padding:8px 0">题库中暂无相关题目。系统会定期自动从真实分析中搜题入库，也可点击「扩展题库」手动补充。</div>';
                     }
                 } else {
-                    simRefEl.innerHTML = '<div style="font-size:13px;color:#64748b;padding:8px 0">识别原题后展示题库中高度相似的题目，供对照参考。</div>';
+                    simRefEl.innerHTML = '<div style="font-size:13px;color:#64748b;padding:8px 0">识别原题后展示题库中最相关的题目，供对照参考。</div>';
                 }
             }
 
@@ -9786,22 +9828,38 @@ var IndoorRouter = (function () {
                 return;
             }
             var admin = isBankAdmin();
-            box.innerHTML = list.map(function (q) {
+            box.innerHTML = list.map(function (q, idx) {
                 var diff = q.diff ? wqDiffBar(q.diff) : "";
+                var cardId = "bankq_" + idx;
                 return '<div class="fb-item" style="padding:14px">' +
                     '<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px">' +
-                    '<div style="flex:1;min-width:0">' +
+                    '<div style="flex:1;min-width:0;cursor:pointer" data-bankview="' + idx + '">' +
                     '<div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-bottom:8px">' +
                     '<span class="wq-item-subject" style="font-size:12px;padding:3px 10px">' + esc(q.subject) + '</span>' +
                     '<span class="wq-kp-tag small" style="font-size:12px">' + esc(q.kp) + '</span>' + diff +
-                    '<span style="font-size:11px;color:#94a3b8">' + esc(q.source) + '</span></div>' +
+                    '<span style="font-size:11px;color:#94a3b8">' + esc(q.source) + '</span>' +
+                    '<span style="font-size:11px;color:#8b5cf6;margin-left:auto">▼ 点击查看详情</span></div>' +
                     '<div style="font-size:16px;color:#1e293b;line-height:1.7;font-weight:500;word-break:break-word">' + esc(q.text) + '</div>' +
-                    (q.answer ? '<div style="font-size:14px;color:#64748b;margin-top:8px;padding-top:8px;border-top:1px dashed #e2e8f0"><b style="color:#475569">答案：</b>' + esc(q.answer).slice(0, 200) + '</div>' : '') +
-                    (q.solution ? '<div style="font-size:13px;color:#64748b;margin-top:6px;line-height:1.6">' + esc(q.solution).slice(0, 200) + '</div>' : '') +
+                    '<div id="' + cardId + '_detail" style="display:none;margin-top:10px;padding-top:10px;border-top:1px dashed #e2e8f0">' +
+                    (q.answer ? '<div style="font-size:14px;color:#166534;margin-bottom:8px"><b style="color:#065f46">✅ 答案：</b>' + renderMath(esc(q.answer)) + '</div>' : '') +
+                    (q.solution ? '<div style="font-size:13px;color:#475569;line-height:1.7"><b style="color:#334155">📖 解析：</b>' + renderMath(esc(q.solution)) + '</div>' : '') +
+                    (q.idea ? '<div style="font-size:13px;color:#7c3aed;line-height:1.7;margin-top:6px"><b>💡 思路：</b>' + renderMath(esc(q.idea)) + '</div>' : '') +
+                    (q.pitfall ? '<div style="font-size:13px;color:#dc2626;line-height:1.7;margin-top:6px"><b>⚠ 易错点：</b>' + renderMath(esc(q.pitfall)) + '</div>' : '') +
+                    '</div>' +
                     '</div>' +
                     (admin ? '<button class="wq-del" data-bankdel="' + encodeURIComponent(q.subject) + '||' + encodeURIComponent(q.kp) + '||' + encodeURIComponent(q.text) + '" style="flex-shrink:0;padding:6px 10px;font-size:13px">🗑 删除</button>' : '') +
                     '</div></div>';
             }).join("");
+            /* 点击题干展开/收起详情 */
+            box.querySelectorAll("[data-bankview]").forEach(function (el) {
+                el.addEventListener("click", function () {
+                    var idx = el.getAttribute("data-bankview");
+                    var det = document.getElementById("bankq_" + idx + "_detail");
+                    if (det) {
+                        det.style.display = det.style.display === "none" ? "block" : "none";
+                    }
+                });
+            });
             if (admin) {
                 box.querySelectorAll("[data-bankdel]").forEach(function (b) {
                     b.addEventListener("click", function () {
@@ -10053,6 +10111,7 @@ var IndoorRouter = (function () {
         var WQ_REVIEW_INTERVALS = [1, 2, 4, 7, 15]; /* 天，按 reviewCount 取 */
         var WQ_REVIEW_COUNT_THRESHOLD = 10;         /* 错题累计达此数也提醒复习 */
         var _wqReviewDueItems = [];                 /* 当前到期复习的错题 */
+        var _wqReviewScopeCat = null;               /* 当前复习的分类作用域（null=全部） */
         var _wqReviewQuiz = null;                   /* 当前复习测验数据 */
 
         /* 计算某道错题下一次复习间隔（毫秒） */
@@ -10060,13 +10119,14 @@ var IndoorRouter = (function () {
             var rc = Math.min(item.reviewCount || 0, WQ_REVIEW_INTERVALS.length - 1);
             return WQ_REVIEW_INTERVALS[rc] * 24 * 3600 * 1000;
         }
-        /* 获取到期复习的错题列表 */
-        function getWQReviewDue() {
+        /* 获取到期复习的错题列表（可按分类过滤） */
+        function getWQReviewDue(catId) {
             var list = getWQ();
             var now = Date.now();
             var due = [];
             for (var i = 0; i < list.length; i++) {
                 var it = list[i];
+                if (catId && it.categoryId !== catId) continue; /* 分类作用域过滤 */
                 var base = it.lastReviewedAt || it.atTs;
                 if (!base) continue;
                 if (now - base >= wqReviewIntervalMs(it)) due.push(it);
@@ -10092,15 +10152,16 @@ var IndoorRouter = (function () {
             if (!cnt) return;
             var old = document.getElementById("wqReviewPromptMask");
             if (old) old.remove();
+            var scopeTip = _wqReviewScopeCat ? "（当前分类内）" : "";
             var mask = document.createElement("div");
             mask.id = "wqReviewPromptMask";
             mask.style.cssText = "position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:99998;display:flex;align-items:center;justify-content:center;padding:20px";
             mask.innerHTML =
                 '<div style="background:#fff;border-radius:14px;max-width:420px;width:100%;padding:22px;box-shadow:0 10px 40px rgba(0,0,0,.25)">' +
-                    '<div style="font-size:20px;font-weight:700;color:#1e293b;margin-bottom:8px">🧠 该复习错题啦</div>' +
+                    '<div style="font-size:20px;font-weight:700;color:#1e293b;margin-bottom:8px">🧠 该复习错题啦' + scopeTip + '</div>' +
                     '<div style="font-size:13px;line-height:1.7;color:#475569;margin-bottom:16px">' +
                         '根据艾宾浩斯遗忘曲线，你有 <b style="color:#dc2626">' + cnt + '</b> 道错题到了复习时间点。<br>' +
-                        '系统将基于这些错题的知识点，出一套<b>全新的选择题</b>（难度比原题拔高2级，最高10级），帮你检验是否真正掌握。' +
+                        '系统将基于这些错题的母知识点，出 <b>3 道</b>全新选择题（难度比原题拔高2级，最高10级），帮你检验是否真正掌握。' +
                     '</div>' +
                     '<div style="display:flex;gap:10px">' +
                         '<button type="button" id="wqReviewStartBtn" style="flex:1;padding:11px;background:#dc2626;color:#fff;border:none;border-radius:8px;font-size:14px;font-weight:600;cursor:pointer">开始复习</button>' +
@@ -10111,7 +10172,7 @@ var IndoorRouter = (function () {
             document.getElementById("wqReviewStartBtn").onclick = function () { mask.remove(); startWQReviewQuiz(); };
             document.getElementById("wqReviewLaterBtn").onclick = function () { mask.remove(); showToast("好的，稍后再提醒你复习"); };
         }
-        /* 开始复习测验：调用AI生成选择题 */
+        /* 开始复习测验：调用AI生成选择题（恒定3题，基于错题母知识点） */
         function startWQReviewQuiz() {
             var items = _wqReviewDueItems;
             if (!items || !items.length) { showToast("暂无需复习的错题"); return; }
@@ -10126,16 +10187,19 @@ var IndoorRouter = (function () {
             var subjects = Object.keys(subSet);
             var kps = Object.keys(kpSet);
             var targetDiff = Math.min(10, (maxDiff || 5) + 2);  /* 难度+2，封顶10 */
+            var REVIEW_Q_COUNT = 3;  /* 每次恒定3道复习题 */
             /* 打开测验弹窗，显示加载中 */
             showWQReviewQuizModal(true);
             /* 调用AI生成选择题 */
             if (WQ_AI_CONFIG.enabled && enabledProviders().length) {
-                aiGenerateReviewQuiz(subjects, kps, targetDiff, items.length, function (err, quiz) {
+                aiGenerateReviewQuiz(subjects, kps, targetDiff, REVIEW_Q_COUNT, function (err, quiz) {
                     if (err || !quiz || !quiz.questions || !quiz.questions.length) {
                         showWQReviewQuizError("生成复习题失败，请稍后重试");
                         return;
                     }
-                    _wqReviewQuiz = { questions: quiz.questions, sourceItems: items, answers: [], current: 0 };
+                    /* 截取最多 REVIEW_Q_COUNT 道 */
+                    var qs = quiz.questions.slice(0, REVIEW_Q_COUNT);
+                    _wqReviewQuiz = { questions: qs, sourceItems: items, answers: [], current: 0 };
                     renderWQReviewQuizQuestion();
                 });
             } else {
@@ -10237,7 +10301,7 @@ var IndoorRouter = (function () {
                 });
             });
         }
-        /* 完成测验，展示结果并建议删除 */
+        /* 完成测验，展示结果并基于权重分析建议删除 */
         function finishWQReviewQuiz() {
             var quiz = _wqReviewQuiz;
             if (!quiz) return;
@@ -10248,9 +10312,7 @@ var IndoorRouter = (function () {
                 if (quiz.answers[i] === quiz.questions[i].answer) correct++;
             }
             var total = quiz.questions.length;
-            var pct = Math.round(correct / total * 100);
-            /* 判断哪些源错题可以删除：正确率>=60%则建议删除对应错题 */
-            var canDelete = pct >= 60;
+            var pct = total ? Math.round(correct / total * 100) : 0;
             var html = '<div style="text-align:center;margin-bottom:18px">' +
                 '<div style="font-size:42px;font-weight:800;color:' + (pct >= 60 ? "#16a34a" : "#dc2626") + '">' + correct + ' / ' + total + '</div>' +
                 '<div style="font-size:14px;color:#64748b">正确率 ' + pct + '%</div>' +
@@ -10268,20 +10330,66 @@ var IndoorRouter = (function () {
                     '</div>';
             }
             html += '</div>';
-            /* 删除建议 */
-            if (canDelete) {
+
+            /* ========== 权重分析：判断哪些错题可以建议删除 ==========
+             * 维度：复习次数(reviewCount) + 加入时长(atTs) + 本次正确率 + 遗忘曲线阶段
+             * 规则：
+             *   - 近1天内刚复习过的题：不建议删（避免近期正确就过早删除）
+             *   - 加入错题本不足3天：不建议删（时间太短）
+             *   - 综合权重 = 复习次数得分(0.4) + 时长得分(0.3) + 正确率得分(0.3)
+             *   - 权重 >= 0.6 才建议删除
+             */
+            var now = Date.now();
+            var DAY = 24 * 3600 * 1000;
+            var suggestDelete = [];
+            var keepList = [];
+            for (var si = 0; si < quiz.sourceItems.length; si++) {
+                var it = quiz.sourceItems[si];
+                var rc = it.reviewCount || 0;
+                var daysSinceAdded = (now - (it.atTs || now)) / DAY;
+                var daysSinceReview = it.lastReviewedAt ? (now - it.lastReviewedAt) / DAY : 999;
+                /* 近期刚复习过（<1天）不建议删 */
+                if (daysSinceReview < 1) { keepList.push(it); continue; }
+                /* 加入不足3天不建议删 */
+                if (daysSinceAdded < 3) { keepList.push(it); continue; }
+                /* 权重计算 */
+                var reviewScore = Math.min(rc / 4, 1) * 0.4;       /* 复习4次以上满分 */
+                var ageScore = Math.min(daysSinceAdded / 7, 1) * 0.3; /* 加入7天以上满分 */
+                var accScore = (pct / 100) * 0.3;                   /* 本次正确率 */
+                var weight = reviewScore + ageScore + accScore;
+                if (weight >= 0.6) {
+                    suggestDelete.push({ item: it, weight: weight });
+                } else {
+                    keepList.push(it);
+                }
+            }
+
+            /* 删除建议区 */
+            if (suggestDelete.length) {
                 html += '<div style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:8px;padding:12px;margin-bottom:14px">' +
-                    '<div style="font-size:13px;color:#166534;margin-bottom:8px">🎉 正确率达标！以下 ' + quiz.sourceItems.length + ' 道错题你已掌握，可以从错题本移除：</div>';
-                quiz.sourceItems.forEach(function (it) {
+                    '<div style="font-size:13px;color:#166534;margin-bottom:4px;font-weight:600">🎉 综合分析达标</div>' +
+                    '<div style="font-size:12px;color:#166534;margin-bottom:8px">以下 ' + suggestDelete.length + ' 道错题已多次复习且间隔达标，你已基本掌握，可以从错题本移除（删不删由你决定）：</div>';
+                suggestDelete.forEach(function (sd) {
+                    var wt = Math.round(sd.weight * 100);
                     html += '<div style="display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid #dcfce7;font-size:13px">' +
-                        '<span style="color:#334155;flex:1;margin-right:8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + esc(it.text).slice(0, 50) + '</span>' +
-                        '<button type="button" class="wq-review-del" data-id="' + it.id + '" style="padding:4px 10px;background:#16a34a;color:#fff;border:none;border-radius:5px;cursor:pointer;font-size:12px;flex-shrink:0">移除</button>' +
+                        '<span style="color:#334155;flex:1;margin-right:8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + esc(sd.item.text) + '">' + esc(sd.item.text).slice(0, 50) + '</span>' +
+                        '<span style="font-size:11px;color:#059669;margin-right:8px;flex-shrink:0">掌握度 ' + wt + '%</span>' +
+                        '<button type="button" class="wq-review-del" data-id="' + sd.item.id + '" style="padding:4px 10px;background:#16a34a;color:#fff;border:none;border-radius:5px;cursor:pointer;font-size:12px;flex-shrink:0">移除</button>' +
                         '</div>';
                 });
                 html += '</div>';
-            } else {
-                html += '<div style="background:#fef2f2;border:1px solid #fecaca;border-radius:8px;padding:12px;margin-bottom:14px;font-size:13px;color:#991b1b">' +
-                    '正确率未达标，这些错题还需要继续复习。系统会按遗忘曲线在下次间隔再次提醒你。' +
+            }
+            /* 未达标提示 */
+            if (keepList.length) {
+                html += '<div style="background:#fef2f2;border:1px solid #fecaca;border-radius:8px;padding:12px;margin-bottom:14px">' +
+                    '<div style="font-size:13px;color:#991b1b;font-weight:600;margin-bottom:4px">📌 以下 ' + keepList.length + ' 道暂不建议移除</div>' +
+                    '<div style="font-size:12px;color:#991b1b">这些错题加入时间较短或复习次数不足，系统会按遗忘曲线在下次间隔再次提醒复习。</div>' +
+                    '</div>';
+            }
+            /* 如果没有任何建议删除，且正确率尚可，给出温和提示 */
+            if (!suggestDelete.length && pct >= 60) {
+                html += '<div style="background:#fffbeb;border:1px solid #fde68a;border-radius:8px;padding:12px;margin-bottom:14px;font-size:13px;color:#92400e">' +
+                    '本次正确率不错，但错题加入时间或复习次数尚未达标，建议再巩固1-2轮后系统会主动建议移除。' +
                     '</div>';
             }
             html += '<button type="button" id="wqQuizFinishBtn" style="width:100%;padding:11px;background:#1f2937;color:#fff;border:none;border-radius:8px;font-size:14px;cursor:pointer">完成</button>';
@@ -10304,7 +10412,7 @@ var IndoorRouter = (function () {
                 quiz.sourceItems.forEach(function (it) { idSet[it.id] = true; });
                 for (var k = 0; k < list.length; k++) {
                     if (idSet[list[k].id]) {
-                        if (canDelete) {
+                        if (pct >= 60) {
                             /* 答对了：复习次数+1，更新复习时间（即使用户没删，也延长间隔） */
                             list[k].reviewCount = (list[k].reviewCount || 0) + 1;
                             list[k].lastReviewedAt = Date.now();
@@ -10317,7 +10425,9 @@ var IndoorRouter = (function () {
                 }
                 saveWQ(list);
                 _wqReviewQuiz = null;
-                document.getElementById("wqReviewQuizMask").remove();
+                _wqReviewScopeCat = null;
+                var mask = document.getElementById("wqReviewQuizMask");
+                if (mask) mask.remove();
                 showToast("复习完成！已更新错题复习记录");
             };
         }
@@ -14378,15 +14488,18 @@ var currentIndoorBld = null;   // 当前进入楼内导航的楼栋（BUILDINGS 
             });
             /* 密码校验：回车或点登录按钮 */
             function tryBankAdminLogin() {
-                if (!wqBankPwdInput) return;
-                if (wqBankPwdInput.value === WQ_BANK_ADMIN_PWD) {
+                var inp = document.getElementById("wqBankPwdInput");
+                if (!inp) return;
+                if (inp.value === WQ_BANK_ADMIN_PWD) {
                     localStorage.setItem("wq_bank_admin", "1");
                     refreshBankAdminUI();
-                    renderBankList(wqBankSearch ? wqBankSearch.value : "");
+                    var searchEl = document.getElementById("wqBankSearch");
+                    renderBankList(searchEl ? searchEl.value : "");
                     showToast("✅ 管理员登录成功，可删除题库题目");
                 } else {
                     showToast("❌ 密码错误");
-                    wqBankPwdInput.value = "";
+                    inp.value = "";
+                    inp.focus();
                 }
             }
             if (wqBankPwdInput) wqBankPwdInput.addEventListener("keydown", function (e) {
@@ -14406,19 +14519,27 @@ var currentIndoorBld = null;   // 当前进入楼内导航的楼栋（BUILDINGS 
             if (wqReviewBtn) wqReviewBtn.addEventListener("click", function () {
                 var list = getWQ();
                 if (!list.length) { showToast("还没有错题，先录入一些吧"); return; }
-                var due = getWQReviewDue();
-                _wqReviewDueItems = due.length ? due : list;
+                /* 分类作用域：当前在某个分类下时，只复习该分类的错题 */
+                var scopeCat = (_wqActiveCat && _wqActiveCat !== "all") ? _wqActiveCat : null;
+                var scopeList = scopeCat ? list.filter(function (r) { return r.categoryId === scopeCat; }) : list;
+                if (scopeCat && !scopeList.length) { showToast("该分类下暂无错题"); return; }
+                var due = getWQReviewDue(scopeCat);
+                _wqReviewDueItems = due.length ? due : scopeList;
+                _wqReviewScopeCat = scopeCat;
                 showWQReviewPrompt();
             });
             var wqRetry = document.getElementById("wqAiRetry");
             if (wqRetry) wqRetry.addEventListener("click", runWQRecognize);
             /* 新建分类 */
-            var wqAddCat = document.getElementById("wqAddCatBtn");
-            if (wqAddCat) wqAddCat.addEventListener("click", function () {
+            var wqAddCatBtnEl = document.getElementById("wqAddCatBtn");
+            if (wqAddCatBtnEl) wqAddCatBtnEl.addEventListener("click", function () {
                 wqPrompt("新建分类", "", function (nm) {
                     if (nm) {
-                        wqAddCat(nm);
-                        _wqActiveCat = "all";
+                        var newCat = wqAddCat(nm);
+                        if (newCat) {
+                            _wqActiveCat = newCat.id;
+                            showToast("✅ 已新建分类「" + nm + "」");
+                        }
                         openWQList();
                     }
                 });
