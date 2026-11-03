@@ -6953,6 +6953,7 @@ var IndoorRouter = (function () {
                 mother:   ["deepseek-v4-pro", "glm-5.3", "kimi-k3.1-pro"], /* 母题溯源 */
                 recommend:["kimi-k3.1-pro", "deepseek-v4-pro", "glm-5.3"],/* 分层推荐 */
                 pipeline: ["deepseek-v4.1-flash", "deepseek-v4-pro", "glm-5.3"], /* 一站式讲解+母题+推题（秒级响应，flash优先） */
+                current:  ["kimi-k3.1-pro", "glm-5.3", "deepseek-v4-pro"],       /* 时效性问题（近期事件/明星/体育/游戏版本），优先知识更新快的模型 */
                 vision:   ["glm-5.3", "deepseek-v4.1-flash"]                        /* 图片多模态识别 */
             },
             /* 默认 Provider（兼容旧逻辑） */
@@ -7384,8 +7385,7 @@ var IndoorRouter = (function () {
          * ================================================================ */
         function aiAnalyzeQuestion(text, cb, imgDataUrl) {
             if (!WQ_AI_CONFIG.enabled) { cb(new Error("ai_disabled"), null); return; }
-            var today = new Date().toISOString().slice(0, 10);
-            var sysPrompt = "你是一位经验丰富的教研组长。今天是" + today + "。请分析题目，严格按JSON返回（不要其他文字）：" +
+            var sysPrompt = "你是一位经验丰富的教研组长。请分析题目，严格按JSON返回（不要其他文字）：" +
                 '{"subject":"学科(数学/物理/化学/生物/语文/英语/政治/历史/地理/其他)","qtype":"题型(选择题/填空题/解答题/证明题/计算题/简答题/作文/阅读理解/其他)","diff":1-10,"kps":["知识点1","知识点2"],"errorCause":"最可能的错因(careless粗心/concept概念不清/method方法未掌握/comprehensive综合能力不足/review审题失误)"}' +
                 "【学科判断要宽泛，禁止轻易返回「其他」】" +
                 "现代物理（宇宙、高维、弦理论、量子、相对论、黑洞、引力、粒子、暗物质、时空、维度等）属于物理；" +
@@ -7546,18 +7546,16 @@ var IndoorRouter = (function () {
             var kpList = (kps && kps.length) ? kps.join("、") : "（请根据题目内容判断）";
             var d = Math.max(1, Math.min(10, origDiff || 5));
             var targetD = Math.min(10, d + 1); /* 严格 L+1，满级推满级 */
-            var today = new Date().toISOString().slice(0, 10);
-            var sysPrompt = "你是一位" + (subject || "全科") + "金牌讲师。今天是" + today + "。请严格按以下分段格式输出（先讲解，再母题，最后推荐题）：\n\n" +
-                "##讲解##\n<【讲透原题——假设学生全程上课昏睡，必须从零讲起】\n" +
+            var sysPrompt = "你是一位" + (subject || "全科") + "金牌讲师。请严格按以下分段格式输出（先讲解，再母题，最后推荐题）：\n\n" +
+                "##讲解##\n<【讲透原题——讲解要细致，从最基础的概念讲起，不假设学生有任何前置知识，用大白话把每个概念和步骤讲清楚】\n" +
                 "讲解要求：\n" +
                 "1. 先一句话点明这道题考什么知识点，为什么会有这道题；\n" +
-                "2. 把涉及的核心概念/公式用大白话解释一遍（像给没听课的学生补基础），不要假设学生记得；\n" +
+                "2. 把涉及的核心概念/公式用大白话解释一遍，像给零基础的人补基础，不要假设学生记得；\n" +
                 "3. 给出完整解题步骤，每一步都说明'为什么这么做'，关键计算不能跳步；\n" +
                 "4. 最后给出明确答案；\n" +
                 "5. 点出学生最容易犯的错或最容易卡住的地方。\n" +
                 "【答案正确性自校】输出前请自检：①答案是否符合题目条件？②推理步骤是否每一步都成立？③是否有更优/更标准的解法？如发现错误请立即修正后再输出。\n" +
-                "【时效性】若题目涉及近期事件、明星动态、游戏版本更新、法律法规变化等可能随时间改变的内容，必须在答案中注明'以下信息基于我的知识截止，最新情况请以官方/最新版本为准'，严禁编造最新数据或结果。\n" +
-                "数学公式用LaTeX，如$x^2$、$\\frac{a}{b}$。配图只用于几何图形、电路图、受力分析图、化学装置等必须可视化的场景，用 [IMG:一句话精确描述图的内容]，例如[IMG:正四面体ABCD，每条棱接电阻R，求AB间等效电阻]。不要为文字说明类内容强行配图。>\n\n" +
+                "数学公式用LaTeX，如$x^2$、$\\frac{a}{b}$。配图要准确恰当、与内容相关，在需要可视化辅助理解的位置插入 [IMG:一句话精确描述图的内容]，例如[IMG:正四面体ABCD，每条棱接电阻R，求AB间等效电阻]。只要配图与内容相关且有助于理解就可以配，不要配无关图片。>\n\n" +
                 "##母题##\n题干：<追溯到该知识点最根本、最原型的母题题干>\n答案：<母题答案与解析>\n知识点：<讲透母知识点：本质、定义、核心公式/定理、适用边界、常见误区，覆盖所有知识源，精当概括>\n演变：<原题如何从母题演变而来>\n\n" +
                 "##推荐##\n<JSON数组，3道题，严禁与原题题型重复或照抄做法，以知识点为根可拓展深化探索>\n" +
                 '格式：[{"text":"题干（单行，不要换行）","answer":"答案","solution":"解析","diff":' + targetD + ',"layer":"基础|变式|拔高"}]\n' +
@@ -7567,12 +7565,15 @@ var IndoorRouter = (function () {
                 { role: "system", content: sysPrompt },
                 { role: "user", content: "学科：" + (subject || "未确定") + "\n知识点：" + kpList + "\n原题难度：L" + d + "\n原题：" + text }
             ];
+            /* 时敏问题（近期事件/明星/体育/游戏版本）→ 路由到知识更新更快的模型 */
+            var timeSensitiveKws = /最近|近期|刚刚|今天|昨天|最新|争议|风波|事件|新闻|赛季|转会|版本更新|补丁|削弱|增强|发布|上映|去世|结婚|离婚|复出|退役|夺冠|冠军|世界杯|欧冠|NBA|CBA|英超|西甲|意甲|德甲|法甲|姆巴佩|梅西|C罗|内马尔|哈兰德|嫦娥|王者|英雄/;
+            var taskType = timeSensitiveKws.test(text) ? "current" : "pipeline";
 
             var acc = "";
             var stage = "explain"; /* explain -> mother -> recs -> done */
             var explainDone = false, motherDone = false;
 
-            WQ_AI_ROUTER.callStream(messages, "pipeline", function (full, delta) {
+            WQ_AI_ROUTER.callStream(messages, taskType, function (full, delta) {
                 acc = full;
                 /* 实时解析分段标记，逐段渲染 */
                 if (stage === "explain") {
@@ -9866,18 +9867,19 @@ var IndoorRouter = (function () {
                 var explainBox = document.getElementById("wqAiExplainBox");
                 var explainText = explainBox ? explainBox.textContent || "" : "";
                 var contextText = "原题：" + (_wqOrigText || origText || "") + "\n讲解：" + explainText.slice(0, 1500);
-                var today = new Date().toISOString().slice(0, 10);
+                /* 时敏问题检测：近期事件/明星/体育/游戏版本/新闻 → 路由到知识更新更快的模型 */
+                var timeSensitiveKws = /最近|近期|刚刚|今天|昨天|本月|今年|最新|争议|风波|事件|新闻|赛季|转会|版本更新|更新了|补丁|削弱|增强|发布|上映|去世|结婚|离婚|复出|退役|夺冠|冠军|世界杯|欧冠|NBA|CBA|英超|西甲|意甲|德甲|法甲|姆巴佩|梅西|C罗|内马尔|哈兰德/;
+                var taskType = timeSensitiveKws.test(q) ? "current" : "pipeline";
                 var messages = [
-                    { role: "system", content: "你是一位耐心的" + (sub || "全科") + "老师。今天是" + today + "。学生对讲透原题的讲解有疑问，请用通俗易懂的方式解答。" +
+                    { role: "system", content: "你是一位耐心的" + (sub || "全科") + "老师。学生对讲透原题的讲解有疑问，请用通俗易懂的方式解答。" +
                         "如果学生问的是讲解中某一步，先回顾那一步再解释。数学公式用LaTeX。回答要具体，不要空泛。" +
-                        "【时效性】若问题涉及近期事件、明星动态、游戏版本更新等可能随时间变化的内容，请在回答开头注明'以下信息基于我的知识，最新情况请以官方为准'，不要编造最新数据。" +
-                        "【配图】只在确实需要示意图（几何、电路、化学装置等）时用 [IMG:描述]，不要为无关内容强行配图。" },
+                        "【配图】配图要准确恰当、与内容相关，有助于理解就可以配，用 [IMG:描述] 标记，不要配无关图片。" },
                     { role: "user", content: contextText + "\n\n学生疑问：" + q }
                 ];
                 /* 流式输出：首字秒级呈现 */
                 var fullAnswer = "";
                 var done = false;
-                WQ_AI_ROUTER.callStream(messages, "pipeline", function (fullText, delta) {
+                WQ_AI_ROUTER.callStream(messages, taskType, function (fullText, delta) {
                     var tempEl = document.getElementById(tempId);
                     if (!tempEl) return;
                     fullAnswer = fullText || "";
