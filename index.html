@@ -9825,8 +9825,8 @@ var IndoorRouter = (function () {
                 var t = (_wqOrigText || origText || "").slice(0, 200);
                 return "wq_qa_" + diagramSeed(t);
             }
-            /* 加载并渲染该题已保存的问答历史 */
-            window.wqLoadQaHistory = function () {
+            /* 加载并渲染该题已保存的问答历史（函数声明会提升，可在 renderWQRecommend 内任意位置调用） */
+            function wqLoadQaHistory() {
                 var box = document.getElementById("wqQaHistory");
                 if (!box) return;
                 var history = [];
@@ -9839,9 +9839,9 @@ var IndoorRouter = (function () {
                         '</div>';
                 }).join("");
                 box.scrollTop = box.scrollHeight;
-            };
+            }
             /* 提交追问：调用 AI 回答，追加到历史并持久化 */
-            window.wqSubmitQa = function () {
+            function wqSubmitQa() {
                 var input = document.getElementById("wqQaInput");
                 var box = document.getElementById("wqQaHistory");
                 if (!input || !box) return;
@@ -9882,7 +9882,10 @@ var IndoorRouter = (function () {
                     if (input) input.disabled = false;
                     input.focus();
                 });
-            };
+            }
+            /* 暴露到全局供 inline onclick 调用 */
+            window.wqLoadQaHistory = wqLoadQaHistory;
+            window.wqSubmitQa = wqSubmitQa;
 
             /* 举一反三提示 —— 非标准题不展示错因/路径提示 */
             var tipEl = document.getElementById("wqTipBox");
