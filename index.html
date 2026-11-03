@@ -6610,6 +6610,8 @@ var IndoorRouter = (function () {
                             for (var i = 0; i < extQs.length; i++) {
                                 /* 精英化：不加载低难度扩展题 */
                                 if ((parseInt(extQs[i].diff) || 0) < minDiff) { skipped++; continue; }
+                                /* 跳过被管理员删除的题（黑名单） */
+                                if (self.isDeleted(extQs[i].text)) { skipped++; continue; }
                                 var dup = false;
                                 for (var j = 0; j < node.questions.length; j++) {
                                     if (textSim(extQs[i].text, node.questions[j].text) > self.config.dedupSimThreshold) { dup = true; break; }
@@ -6633,18 +6635,54 @@ var IndoorRouter = (function () {
                         var node = WQ_BANK[sub][kp];
                         var before = (node.questions || []).length;
                         node.questions = (node.questions || []).filter(function (q) {
-                            return (parseInt(q.diff) || 0) >= minDiff;
+                            /* 同时清理低难度题和已被管理员删除（黑名单）的题 */
+                            if ((parseInt(q.diff) || 0) < minDiff) return false;
+                            if (self.isDeleted(q.text)) return false;
+                            return true;
                         });
                         removed += before - node.questions.length;
                     }
                 }
                 if (removed > 0) {
-                    self.log("精英化清理：移除低难度题 " + removed + " 道（门槛 diff≥" + minDiff + "）");
+                    self.log("精英化清理：移除低难度/已删题 " + removed + " 道（门槛 diff≥" + minDiff + "）");
                     try { self.persistBank(); } catch (e) { /* 忽略 */ }
                 }
                 return removed;
             },
 
+            /* 重新校准所有题库题目的难度等级（用最新的 estimateDifficulty + calibrateDiff）
+             * 解决历史题目难度标注严重偏高/偏低的问题 */
+            recalibrateDifficulty: function () {
+                var self = this;
+                if (typeof estimateDifficulty !== "function" || typeof calibrateDiff !== "function") return 0;
+                var changed = 0, minDiff = WQ_AI_CONFIG.bankMinDiff || 7;
+                for (var sub in WQ_BANK) {
+                    for (var kp in WQ_BANK[sub]) {
+                        var node = WQ_BANK[sub][kp];
+                        if (!node.questions) continue;
+                        for (var i = 0; i < node.questions.length; i++) {
+                            var q = node.questions[i];
+                            var oldDiff = parseInt(q.diff) || 0;
+                            /* 用规则评分 + 校准函数重新计算难度 */
+                            var ruleDiff = estimateDifficulty(q.text || "");
+                            var newDiff = calibrateDiff(ruleDiff, q.text || "");
+                            /* AI 来源的题（含 answer/solution）若规则评分偏低，允许保留但不超过 8 */
+                            var hasFull = (q.answer && q.answer.length > 2) || (q.solution && q.solution.length > 10);
+                            if (hasFull && newDiff < ruleDiff) newDiff = Math.min(8, ruleDiff);
+                            if (newDiff !== oldDiff) {
+                                q.diff = newDiff;
+                                changed++;
+                            }
+                            /* 重新校准后若难度不达标，标记待清理 */
+                        }
+                    }
+                }
+                if (changed > 0) {
+                    self.log("难度重新校准：更新 " + changed + " 道题的难度等级");
+                    try { self.persistBank(); } catch (e) {}
+                }
+                return changed;
+            },
             /* 自动更新时间戳 */
             lastUpdated: function () { var t = localStorage.getItem("wq_last_update"); return t ? parseInt(t, 10) : 0; },
             markUpdated: function () { localStorage.setItem("wq_last_update", String(Date.now())); },
@@ -6682,17 +6720,63 @@ var IndoorRouter = (function () {
                 }
             },
 
-            /* 管理员：删除题库中指定题目（按学科/知识点/题干文本匹配） */
+            /* 删除黑名单：本地持久化，确保被管理员删除的题不会被 syncSharedBank 重新同步回来 */
+            _deletedKey: "wq_deleted_blacklist",
+            getDeletedBlacklist: function () {
+                try {
+                    var raw = localStorage.getItem(this._deletedKey);
+                    return raw ? JSON.parse(raw) : [];
+                } catch (e) { return []; }
+            },
+            addToDeletedBlacklist: function (text) {
+                if (!text) return;
+                var list = this.getDeletedBlacklist();
+                if (list.indexOf(text) < 0) {
+                    list.push(text);
+                    if (list.length > 500) list = list.slice(-500);
+                    try { localStorage.setItem(this._deletedKey, JSON.stringify(list)); } catch (e) {}
+                }
+            },
+            isDeleted: function (text) {
+                if (!text) return false;
+                var list = this.getDeletedBlacklist();
+                for (var i = 0; i < list.length; i++) {
+                    if (list[i] === text || textSim(list[i], text) > 0.95) return true;
+                }
+                return false;
+            },
+
+            /* 管理员：删除题库中指定题目（按学科/知识点/题干文本匹配）
+             * ① 加入本地删除黑名单（立即生效，防止 syncSharedBank 重新拉回）
+             * ② 从本地 WQ_BANK 移除
+             * ③ 调用 DELETE /api/wq/bank 从共享题库（KV）移除，对所有用户生效 */
             removeQuestion: function (subject, kp, qText) {
-                if (!WQ_BANK[subject] || !WQ_BANK[subject][kp]) return false;
-                var node = WQ_BANK[subject][kp];
-                var before = (node.questions || []).length;
-                node.questions = (node.questions || []).filter(function (q) {
-                    return q.text !== qText && textSim(q.text, qText) < 0.95;
-                });
-                var removed = before - node.questions.length;
-                if (removed > 0) this.persistBank();
-                return removed > 0;
+                var self = this;
+                /* ① 加入黑名单 */
+                self.addToDeletedBlacklist(qText);
+                /* ② 从本地 WQ_BANK 移除 */
+                var removed = 0;
+                if (WQ_BANK[subject] && WQ_BANK[subject][kp]) {
+                    var node = WQ_BANK[subject][kp];
+                    var before = (node.questions || []).length;
+                    node.questions = (node.questions || []).filter(function (q) {
+                        return q.text !== qText && textSim(q.text, qText) < 0.95;
+                    });
+                    removed = before - node.questions.length;
+                    if (removed > 0) self.persistBank();
+                }
+                /* ③ 同步删除到共享题库（异步，不阻塞本地删除） */
+                try {
+                    fetch("/api/wq/bank", {
+                        method: "DELETE",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ subject: subject, kp: kp, text: qText })
+                    }).then(function (r) { return r.json(); }).then(function (res) {
+                        if (res && res.ok) self.log("共享题库删除成功（" + (res.removed || 0) + " 道）");
+                        else self.log("共享题库删除：" + (res ? (res.reason || res.error || "未找到") : "无响应"));
+                    }).catch(function (e) { self.log("共享题库删除请求失败：" + e.message); });
+                } catch (e) { /* 网络异常不影响本地 */ }
+                return removed > 0 || true;  /* 即使本地未命中也返回 true（已加入黑名单） */
             },
 
             /* 获取题库中所有题目列表（用于展示） */
@@ -6706,6 +6790,8 @@ var IndoorRouter = (function () {
                         for (var i = 0; i < qs.length; i++) {
                             /* 精英化：只展示难度 ≥ bankMinDiff（高中顶级）的题 */
                             if ((parseInt(qs[i].diff) || 0) < minDiff) continue;
+                            /* 跳过被管理员删除的题（黑名单） */
+                            if (this.isDeleted(qs[i].text)) continue;
                             all.push({
                                 subject: sub, kp: kp,
                                 text: qs[i].text, answer: qs[i].answer,
@@ -6742,6 +6828,8 @@ var IndoorRouter = (function () {
                                 for (var i = 0; i < extQs.length; i++) {
                                     /* 精英化：共享题库也只收难度 ≥ bankMinDiff 的题 */
                                     if ((parseInt(extQs[i].diff) || 0) < (WQ_AI_CONFIG.bankMinDiff || 7)) continue;
+                                    /* 跳过被管理员删除的题（黑名单），防止重新同步回来 */
+                                    if (WQ_PIPELINE_B.isDeleted(extQs[i].text)) continue;
                                     var dup = false;
                                     for (var j = 0; j < node.questions.length; j++) {
                                         if (textSim(extQs[i].text, node.questions[j].text) > WQ_PIPELINE_B.config.dedupSimThreshold) { dup = true; break; }
@@ -13954,9 +14042,15 @@ var currentIndoorBld = null;   // 当前进入楼内导航的楼栋（BUILDINGS 
                 '填入后可在页面内显示高德地图并<b>点楼直接进入立体导航</b>。' +
                 '去 <a href="https://lbs.amap.com/" target="_blank" style="color:#1d4ed8;">高德开放平台</a> 申请「Web 端(JS API)」Key。</p>' +
                 '<label style="font-size:13px;color:#334155;">Key</label>' +
-                '<input id="amapKeyInput" style="width:100%;box-sizing:border-box;padding:10px;margin:6px 0 12px;border:1px solid #cfd9e5;border-radius:8px;font-size:14px;color:#0f172a;">' +
+                '<div style="position:relative">' +
+                '<input id="amapKeyInput" type="password" autocomplete="off" style="width:100%;box-sizing:border-box;padding:10px 40px 10px 10px;margin:6px 0 12px;border:1px solid #cfd9e5;border-radius:8px;font-size:14px;color:#0f172a;">' +
+                '<button type="button" id="keyEyeBtn" style="position:absolute;right:8px;top:14px;background:none;border:none;cursor:pointer;font-size:16px;color:#64748b;padding:4px;">👁</button>' +
+                '</div>' +
                 '<label style="font-size:13px;color:#334155;">安全密钥（可选，部分服务需要）</label>' +
-                '<input id="amapSecInput" style="width:100%;box-sizing:border-box;padding:10px;margin:6px 0 16px;border:1px solid #cfd9e5;border-radius:8px;font-size:14px;color:#0f172a;">' +
+                '<div style="position:relative">' +
+                '<input id="amapSecInput" type="password" autocomplete="off" style="width:100%;box-sizing:border-box;padding:10px 40px 10px 10px;margin:6px 0 16px;border:1px solid #cfd9e5;border-radius:8px;font-size:14px;color:#0f172a;">' +
+                '<button type="button" id="secEyeBtn" style="position:absolute;right:8px;top:14px;background:none;border:none;cursor:pointer;font-size:16px;color:#64748b;padding:4px;">👁</button>' +
+                '</div>' +
                 '<div style="display:flex;align-items:center;justify-content:space-between;gap:12px;' +
                 'padding:12px 0 4px;border-top:1px solid #e8eef6;">' +
                 '<div><div style="font-size:14px;color:#0f172a;">界面动效</div>' +
@@ -13971,6 +14065,19 @@ var currentIndoorBld = null;   // 当前进入楼内导航的楼栋（BUILDINGS 
             document.body.appendChild(overlay);
             document.getElementById("amapKeyInput").value = getAmapKey();
             document.getElementById("amapSecInput").value = getAmapSec();
+            /* Key/安全密钥显示切换（默认隐藏） */
+            var keyEye = document.getElementById("keyEyeBtn");
+            var secEye = document.getElementById("secEyeBtn");
+            keyEye.onclick = function () {
+                var inp = document.getElementById("amapKeyInput");
+                inp.type = inp.type === "password" ? "text" : "password";
+                keyEye.textContent = inp.type === "password" ? "👁" : "🙈";
+            };
+            secEye.onclick = function () {
+                var inp = document.getElementById("amapSecInput");
+                inp.type = inp.type === "password" ? "text" : "password";
+                secEye.textContent = inp.type === "password" ? "👁" : "🙈";
+            };
             document.getElementById("keyCancelBtn").onclick = function () { overlay.remove(); };
             /* 动效开关从地图上的悬浮按钮移到设置里，减少常驻按钮密度 */
             var fxb = document.getElementById("fxToggleBtn");
@@ -14762,7 +14869,7 @@ var currentIndoorBld = null;   // 当前进入楼内导航的楼栋（BUILDINGS 
                 wqTa.addEventListener("input", updateWQPreview);
                 wqTa.addEventListener("paste", function () { setTimeout(updateWQPreview, 50); });
             }
-            /* 图片上传：压缩后存入 _wqImg，并自动触发 OCR 预填题目框（用户可编辑补充） */
+            /* 图片上传：压缩后存入 _wqImg，文本框仅作补充说明（不自动 OCR） */
             var wqImgInput = document.getElementById("wqImgInput");
             if (wqImgInput) {
                 wqImgInput.addEventListener("change", function () {
@@ -14777,16 +14884,10 @@ var currentIndoorBld = null;   // 当前进入楼内导航的楼栋（BUILDINGS 
                         if (show) show.src = dataUrl;
                         if (prev) prev.style.display = "block";
                         if (label) label.style.display = "none";
-                        /* 图片模式：文本框变为"补充说明"，占位符提示可编辑/补充 */
-                        if (ta) ta.setAttribute("placeholder", "图片已上传，可在此补充或修正题目文字（辅助识别，支持 LaTeX 如 $x^2$）");
-                        /* 自动 OCR 预填题目框（识别结果可编辑补充，不阻塞用户操作） */
+                        /* 图片模式：文本框仅用于补充要求与信息 */
+                        if (ta) ta.setAttribute("placeholder", "可补充要求与信息（可选，辅助AI更准确识别）");
                         var ocrTip = document.getElementById("wqOcrTip");
-                        if (ocrTip) { ocrTip.style.display = "block"; ocrTip.innerHTML = "🔄 正在识别图片文字…（可在下方文本框补充/修正）"; }
-                        if (typeof runWQOcr === "function") {
-                            try { runWQOcr(); } catch (e) { /* OCR 失败不阻塞 */ }
-                        } else if (ocrTip) {
-                            ocrTip.innerHTML = "✅ 图片已就绪，点「🔍 分析题目」即可（也可在下方文本框补充题目文字）";
-                        }
+                        if (ocrTip) { ocrTip.style.display = "block"; ocrTip.innerHTML = "✅ 图片已上传，点「🔍 分析题目」即可识别（可在下方补充说明）"; }
                     });
                     wqImgInput.value = "";
                 });
@@ -14801,8 +14902,8 @@ var currentIndoorBld = null;   // 当前进入楼内导航的楼栋（BUILDINGS 
                 if (prev) prev.style.display = "none";
                 if (label) label.style.display = "flex";
                 if (ocrTip) ocrTip.style.display = "none";
-                /* 无图片模式：文本框即题目，恢复原占位符 */
-                if (ta) ta.setAttribute("placeholder", "拍照后自动识别题目文字，也可手动输入或粘贴…（支持 LaTeX 公式如 $x^2$）");
+                /* 无图片模式：文本框即题目输入处 */
+                if (ta) ta.setAttribute("placeholder", "请输入题目（支持 LaTeX 公式如 $x^2$）");
             });
             /* ---- 流水线 B：扩展题库 按钮 ---- */
             var wqExpand = document.getElementById("wqExpandBankBtn");
@@ -14812,6 +14913,8 @@ var currentIndoorBld = null;   // 当前进入楼内导航的楼栋（BUILDINGS 
                 if (window.WQ_PIPELINE_B) {
                     WQ_PIPELINE_B.loadExtraBank();
                     WQ_PIPELINE_B.purgeLowDiffQuestions();   /* 精英化：清理内置+扩展中的低难度题 */
+                    WQ_PIPELINE_B.recalibrateDifficulty();     /* 重新校准历史题目难度等级 */
+                    WQ_PIPELINE_B.purgeLowDiffQuestions();    /* 校准后再次清理不达标题 */
                     WQ_PIPELINE_B.startAutoUpdate();
                     refreshWqBankStatus();
                     /* 从服务端 KV 同步共享题库（Worker 自主更新的题） */
@@ -18008,7 +18111,7 @@ body.fire-mode #fireOverlay{display:flex}
     </div>
 
     <!-- 题目文本 -->
-    <textarea class="fb-text" id="wqText" placeholder="拍照后自动识别题目文字，也可手动输入或粘贴…（支持 LaTeX 公式如 $x^2$）"></textarea>
+    <textarea class="fb-text" id="wqText" placeholder="请输入题目（支持 LaTeX 公式如 $x^2$）"></textarea>
     <!-- 公式实时预览 -->
     <div id="wqTextPreview" style="display:none;background:#f8fafc;border:1px dashed #e2e8f0;border-radius:8px;padding:10px 12px;margin-top:6px;font-size:13px;line-height:1.7;color:#1e293b;white-space:pre-wrap"></div>
 

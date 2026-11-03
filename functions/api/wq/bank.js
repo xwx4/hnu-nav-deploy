@@ -140,12 +140,64 @@ function textSim(a, b) {
   return inter / Math.max(setA.size, setB.size, 1);
 }
 
+/**
+ * DELETE /api/wq/bank — 管理员删除共享题库中的题目
+ * body: { subject, kp, text }
+ * 从 KV 的 wq_bank_shared 中移除该题（精确匹配或相似度>0.95），
+ * 确保所有用户同步后不再看到此题。
+ */
+export async function onRequestDelete(context) {
+  try {
+    var env = context.env || {};
+    var KV = env.WQ_BANK_KV;
+    if (!KV || typeof KV.get !== "function" || typeof KV.put !== "function") {
+      return json({ error: "KV namespace WQ_BANK_KV not bound for delete", bound_env_keys: Object.keys(env) }, 500);
+    }
+    var body;
+    try { body = await context.request.json(); } catch (e) { return json({ error: "invalid JSON body" }, 400); }
+    var subject = String(body.subject || "").trim();
+    var kp = String(body.kp || "").trim();
+    var text = String(body.text || "").trim();
+    if (!subject || !kp || !text) return json({ error: "subject, kp, text required" }, 400);
+
+    var raw = await KV.get("wq_bank_shared");
+    var bank = raw ? JSON.parse(raw) : {};
+    if (!bank[subject] || !bank[subject][kp]) {
+      return json({ ok: false, reason: "not_found" });
+    }
+    var node = bank[subject][kp];
+    var before = (node.questions || []).length;
+    node.questions = (node.questions || []).filter(function (q) {
+      return q.text !== text && textSim(q.text, text) < 0.95;
+    });
+    var removed = before - node.questions.length;
+    if (removed > 0) {
+      await KV.put("wq_bank_shared", JSON.stringify(bank));
+      /* 记录删除日志 */
+      var logRaw = await KV.get("wq_bank_log");
+      var log = [];
+      try { var p = logRaw ? JSON.parse(logRaw) : []; log = Array.isArray(p) ? p : []; } catch (e) { log = []; }
+      log.unshift({
+        at: new Date().toISOString(),
+        action: "admin_delete",
+        subject: subject, kp: kp,
+        text: text.slice(0, 100)
+      });
+      if (log.length > 100) log = log.slice(0, 100);
+      await KV.put("wq_bank_log", JSON.stringify(log));
+    }
+    return json({ ok: removed > 0, removed: removed });
+  } catch (e) {
+    return json({ error: "delete failed: " + (e && e.message ? e.message : String(e)) }, 500);
+  }
+}
+
 export async function onRequestOptions() {
   return new Response(null, {
     status: 204,
     headers: {
       "Access-Control-Allow-Origin": "*",
-      "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+      "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
       "Access-Control-Allow-Headers": "Content-Type",
       "Access-Control-Max-Age": "86400"
     }
