@@ -7511,7 +7511,7 @@ var IndoorRouter = (function () {
             var d = Math.max(1, Math.min(10, origDiff || 5));
             var targetD = Math.min(10, d + 1); /* 严格 L+1，满级推满级 */
             var sysPrompt = "你是一位" + (subject || "全科") + "教研专家。请严格按以下分段格式输出（先讲解，再母题，最后推荐题）：\n\n" +
-                "##讲解##\n<原题完整讲解：思路+关键步骤+最终答案。数学公式用LaTeX，如$x^2$、$\\frac{a}{b}$。必要时可用文字描述辅助示意图。精炼，不啰嗦>\n\n" +
+                "##讲解##\n<原题完整讲解：思路+关键步骤+最终答案。数学公式用LaTeX，如$x^2$、$\\frac{a}{b}$。若讲解中需要配图（如几何图形、电路图、受力分析图、化学装置等），在该位置插入 [IMG:一句话描述图的内容]，例如[IMG:正四面体ABCD，每条棱接电阻R，求AB间等效电阻]。精炼，不啰嗦>\n\n" +
                 "##母题##\n题干：<追溯到该知识点最根本、最原型的母题题干>\n答案：<母题答案与解析>\n知识点：<讲透母知识点：本质、定义、核心公式/定理、适用边界、常见误区，覆盖所有知识源，精当概括>\n演变：<原题如何从母题演变而来>\n\n" +
                 "##推荐##\n<JSON数组，3道题，严禁与原题题型重复或照抄做法，以知识点为根可拓展深化探索>\n" +
                 '格式：[{"text":"题干（单行，不要换行）","answer":"答案","solution":"解析","diff":' + targetD + ',"layer":"基础|变式|拔高"}]\n' +
@@ -8270,6 +8270,51 @@ var IndoorRouter = (function () {
             return "••••••••" + k.slice(-4);
         }
 
+        /* 题目配图生成：使用 Pollinations AI 免费文生图（无需 API Key，GET 请求直接返回图片）
+         * @param {string} desc - 图片描述
+         * @param {object} opts - { width, height, subject }
+         * @returns {string} 图片 URL
+         */
+        function generateDiagram(desc, opts) {
+            opts = opts || {};
+            var w = opts.width || 640;
+            var h = opts.height || 480;
+            var subj = opts.subject || "";
+            var styleTag = "";
+            if (subj === "物理") styleTag = "physics diagram, circuit diagram, clean educational illustration, black on white, ";
+            else if (subj === "数学") styleTag = "mathematical diagram, geometry figure, clean lines, black on white, ";
+            else if (subj === "化学") styleTag = "chemistry diagram, molecular structure, clean educational illustration, ";
+            else styleTag = "educational diagram, clear illustration, black on white, ";
+            var prompt = styleTag + desc + ", high quality, no text labels";
+            return "https://image.pollinations.ai/prompt/" + encodeURIComponent(prompt) +
+                "?width=" + w + "&height=" + h + "&nologo=true&seed=" + Math.floor(Math.random() * 100000);
+        }
+        /* 判断题目文本是否需要配图 */
+        function needsDiagram(text) {
+            if (!text) return false;
+            return /如图|图中|下图|上图|图所示|见图|配图/.test(text);
+        }
+        /* 解析文本中的 [IMG:描述] 标记，替换为 <img> 配图 */
+        function renderDiagramMarkers(text, subject) {
+            if (!text) return "";
+            var s = String(text);
+            /* 提取所有 [IMG:...] 标记并替换为占位符 */
+            var markers = [];
+            s = s.replace(/\[IMG:([^\]]+)\]/g, function (_, desc) {
+                markers.push(desc);
+                return "\x00IMG" + (markers.length - 1) + "\x00";
+            });
+            /* 先渲染数学公式 */
+            s = renderMath(s);
+            /* 替换占位符为 <img> */
+            s = s.replace(/\x00IMG(\d+)\x00/g, function (_, i) {
+                var desc = markers[parseInt(i)] || "";
+                var url = generateDiagram(desc, { subject: subject, width: 520, height: 360 });
+                return '<div style="margin:10px 0;text-align:center"><img src="' + url + '" alt="' + esc(desc) + '" style="max-width:100%;max-height:280px;border-radius:8px;border:1px solid #e2e8f0" onerror="this.style.display=\'none\'" /></div>';
+            });
+            return s;
+        }
+
         /* 轻量 Markdown 转换（作用于已 HTML 转义的文本，井号/星号/连字符不受转义影响）
          * 支持：# 标题、**加粗**、-/* 无序列表、1. 有序列表 */
         function mdInline(s) {
@@ -8877,7 +8922,7 @@ var IndoorRouter = (function () {
                     q.explain = text;
                     if (idx === _wqActiveMultiIdx) {
                         var explBox = document.getElementById("wqAiExplainBox");
-                        if (explBox) explBox.innerHTML = '<div style="background:#f5f3ff;border:1px solid #ddd6fe;border-radius:8px;padding:10px 12px;margin-top:8px"><b style="color:#6d28d9">📖 讲解</b><div style="white-space:pre-wrap;font-size:13px;line-height:1.7;color:#1e293b;margin-top:6px">' + renderMath(text || "") + '</div></div>';
+                        if (explBox) explBox.innerHTML = '<div style="background:#f5f3ff;border:1px solid #ddd6fe;border-radius:8px;padding:10px 12px;margin-top:8px"><b style="color:#6d28d9">📖 讲解</b><div style="white-space:pre-wrap;font-size:13px;line-height:1.7;color:#1e293b;margin-top:6px">' + renderDiagramMarkers(text || "", q.subject) + '</div></div>';
                     }
                 },
                 onMother: function (m) {
@@ -9336,6 +9381,10 @@ var IndoorRouter = (function () {
                         '<div class="wq-deep-head"><span class="wq-deep-badge">🎯 讲透这道题</span>' +
                         '<span class="wq-deep-diff">' + wqDiffBar(origDiff) + '</span></div>' +
                         '<div class="wq-deep-q">' + renderMath(decodeHtml(origText)) + '</div>' +
+                        /* 显示用户上传的原题图片（若有） */
+                        (_wqImg ? '<div style="margin:10px 0;text-align:center"><img src="' + esc(_wqImg) + '" alt="原题图片" style="max-width:100%;max-height:340px;border-radius:8px;border:1px solid #e2e8f0" /></div>' : '') +
+                        /* 题干提到图但无原图时，自动生成配图 */
+                        ((!_wqImg && needsDiagram(origText)) ? '<div style="margin:10px 0;text-align:center"><img src="' + generateDiagram(origText.replace(/[。，；].*$/, "").slice(0, 80), { subject: sub, width: 560, height: 400 }) + '" alt="题目配图" style="max-width:100%;max-height:300px;border-radius:8px;border:1px solid #e2e8f0" onerror="this.style.display=\'none\'" /></div>' : '') +
                         '<div class="wq-deep-sections">' +
                             '<div class="wq-deep-sec"><b>考点：</b>' + kpStr + (featStr ? ' <b style="margin-left:10px">题型：</b>' + featStr : '') + '</div>';
 
@@ -9519,6 +9568,7 @@ var IndoorRouter = (function () {
                     html += '<div class="wq-rec-card' + (mastered === true ? ' mastered' : '') + (mastered === false ? ' not-mastered' : '') + '">' +
                         '<div class="wq-rec-q">' +
                             '<span class="wq-rec-q-text">' + renderMath(qText) + '</span>' +
+                            (needsDiagram(qText) ? '<div style="margin:6px 0;text-align:center"><img src="' + generateDiagram(qText.replace(/[。，；].*$/, "").slice(0, 60), { subject: sub, width: 480, height: 320 }) + '" alt="配图" style="max-width:100%;max-height:220px;border-radius:6px;border:1px solid #e2e8f0" onerror="this.style.display=\'none\'" /></div>' : '') +
                             '<span class="wq-rec-q-meta">' +
                                 '<span class="wq-rec-diff">' + wqDiffBar(q.diff) + '</span>' +
                                 (isTransfer ? '<span class="wq-transfer-tag">🔀 知识迁移</span>' : '') + genBadge + layerBadge +
@@ -9557,7 +9607,7 @@ var IndoorRouter = (function () {
                             if (explBox) {
                                 explBox.innerHTML = '<div style="background:#f5f3ff;border:1px solid #ddd6fe;border-radius:8px;padding:10px 12px;margin-top:8px">' +
                                     '<b style="color:#6d28d9">📖 讲解</b>' +
-                                    '<div style="white-space:pre-wrap;font-size:13px;line-height:1.7;color:#1e293b;margin-top:6px">' + renderMath(text || "") + '</div>' +
+                                    '<div style="white-space:pre-wrap;font-size:13px;line-height:1.7;color:#1e293b;margin-top:6px">' + renderDiagramMarkers(text || "", sub) + '</div>' +
                                     '</div>';
                             }
                         },
@@ -10652,7 +10702,7 @@ var IndoorRouter = (function () {
                     }
                     /* 截取最多 REVIEW_Q_COUNT 道 */
                     var qs = quiz.questions.slice(0, REVIEW_Q_COUNT);
-                    _wqReviewQuiz = { questions: qs, sourceItems: items, answers: [], current: 0 };
+                    _wqReviewQuiz = { questions: qs, sourceItems: items, answers: [], current: 0, subjects: subjects };
                     renderWQReviewQuizQuestion();
                 });
             } else {
@@ -10664,10 +10714,19 @@ var IndoorRouter = (function () {
             var subj = (subjects && subjects.length) ? subjects.join("、") : "综合";
             var kpList = (kps && kps.length) ? kps.join("、") : "相关知识点";
             var n = Math.min(8, Math.max(3, count));
-            var sysPrompt = "你是一位出题专家。请基于以下知识点，生成 " + n + " 道全新的单项选择题（不要复用任何已有题目）。" +
+            /* 读取历史出题记录，避免连续重复 */
+            var history = [];
+            try { history = JSON.parse(localStorage.getItem("wq_quiz_history") || "[]"); } catch (e) {}
+            var historyTip = "";
+            if (history && history.length) {
+                var recent = history.slice(-10).map(function (h) { return h.q; }).join("；");
+                historyTip = "\n【以下题目近期已出过，严禁重复或高度相似】\n" + recent;
+            }
+            var sysPrompt = "你是一位出题专家。请基于以下知识点，生成 " + n + " 道全新的单项选择题（绝对不要复用任何已有题目，也不要与历史题目相似）。" +
                 "难度等级 " + diff + "（1-10级，数字越大越难）。" +
-                "严格按JSON返回：{\"questions\":[{\"q\":\"题干\",\"options\":[\"A选项\",\"B选项\",\"C选项\",\"D选项\"],\"answer\":0,\"explain\":\"解析\"}]}。" +
-                "answer为正确选项的索引(0-3)。题干和选项要具体、有区分度，不要空话。";
+                "每题若需要配图（如几何图形、电路图、物理装置、化学实验装置等），needImg设为true，imgDesc用一句话描述图的内容（如'正四面体电阻网络，每条棱接一个电阻R'）。不需要图则needImg为false。" +
+                "严格按JSON返回：{\"questions\":[{\"q\":\"题干\",\"options\":[\"A选项\",\"B选项\",\"C选项\",\"D选项\"],\"answer\":0,\"explain\":\"解析\",\"needImg\":false,\"imgDesc\":\"\"}]}。" +
+                "answer为正确选项的索引(0-3)。题干和选项要具体、有区分度，不要空话。" + historyTip;
             var messages = [
                 { role: "system", content: sysPrompt },
                 { role: "user", content: "学科：" + subj + "\n知识点：" + kpList + "\n请出题。" }
@@ -10682,6 +10741,12 @@ var IndoorRouter = (function () {
                         obj.questions = obj.questions.filter(function (q) {
                             return q.q && Array.isArray(q.options) && q.options.length === 4 && q.answer >= 0 && q.answer <= 3;
                         });
+                        /* 保存本次出题主键到历史（最多存30条） */
+                        var newHistory = (history || []).concat(obj.questions.map(function (q) {
+                            return { q: q.q.slice(0, 100), ts: Date.now() };
+                        }));
+                        if (newHistory.length > 30) newHistory = newHistory.slice(-30);
+                        try { localStorage.setItem("wq_quiz_history", JSON.stringify(newHistory)); } catch (e) {}
                         cb(null, obj);
                     } else { cb(new Error("parse_failed"), null); }
                 } catch (e) { cb(e, null); }
@@ -10724,9 +10789,22 @@ var IndoorRouter = (function () {
             if (!body) return;
             var q = quiz.questions[quiz.current];
             var total = quiz.questions.length;
+            var subj = (quiz.subjects && quiz.subjects.length) ? quiz.subjects[0] : "";
+            /* 配图：AI标记 needImg 或 题干含"如图"等关键词时生成 */
+            var imgHtml = "";
+            if (q.needImg || needsDiagram(q.q)) {
+                var imgDesc = q.imgDesc || q.q.replace(/[。，；].*$/, "").slice(0, 60);
+                var imgUrl = generateDiagram(imgDesc, { subject: subj, width: 560, height: 380 });
+                imgHtml = '<div style="margin:10px 0;text-align:center">' +
+                    '<img src="' + imgUrl + '" alt="题目配图" style="max-width:100%;max-height:300px;border-radius:8px;border:1px solid #e2e8f0" ' +
+                    'onerror="this.style.display=\'none\';this.nextElementSibling.style.display=\'block\'" />' +
+                    '<div style="display:none;font-size:12px;color:#94a3b8;padding:8px">⚠ 配图加载失败，请参考题干描述</div>' +
+                    '</div>';
+            }
             var html = '<div style="margin-bottom:12px;font-size:13px;color:#64748b">第 ' + (quiz.current + 1) + ' / ' + total + ' 题</div>' +
-                '<div style="font-size:15px;font-weight:600;color:#1e293b;line-height:1.6;margin-bottom:16px">' + renderMath(q.q) + '</div>' +
-                '<div style="display:flex;flex-direction:column;gap:8px">';
+                '<div style="font-size:15px;font-weight:600;color:#1e293b;line-height:1.6;margin-bottom:8px">' + renderMath(q.q) + '</div>' +
+                imgHtml +
+                '<div style="display:flex;flex-direction:column;gap:8px;margin-top:12px">';
             for (var i = 0; i < q.options.length; i++) {
                 var letter = String.fromCharCode(65 + i);
                 html += '<button type="button" class="wq-quiz-opt" data-idx="' + i + '" style="text-align:left;padding:12px 14px;border:1px solid #e2e8f0;border-radius:8px;background:#fff;cursor:pointer;font-size:14px;color:#334155;transition:all .15s">' +
