@@ -7770,8 +7770,8 @@ var IndoorRouter = (function () {
                     var q = questions[i];
                     if (!q.text) continue;
                     var v = WQ_PIPELINE_B.verifyQuestion({
-                        text: q.text, answer: q.answer || "（AI生成，暂无答案）",
-                        source: "智能生成-" + res.provider, source_url: "", verify_status: "pending"
+                        text: q.text, answer: q.answer || "（暂无答案）",
+                        source: "系统-" + res.provider, source_url: "", verify_status: "pending"
                     });
                     if (v.ok) {
                         var tags = WQ_PIPELINE_B.tagQuestion(q, subject);
@@ -7779,7 +7779,7 @@ var IndoorRouter = (function () {
                             text: q.text, answer: q.answer || "", idea: q.idea || "",
                             solution: q.solution || "", pitfall: "", method: "",
                             diff: q.diff || tags.diff, kp: tags.kps, ability: [],
-                            source: "智能生成-" + res.provider, verify_status: "passed",
+                            source: "系统-" + res.provider, verify_status: "passed",
                             _aiGenerated: true
                         });
                     }
@@ -7926,7 +7926,7 @@ var IndoorRouter = (function () {
             var body = document.getElementById("wqAiCfgBody");
             if (!body) return;
             document.getElementById("wqAiEnabled").checked = WQ_AI_CONFIG.enabled;
-            var h = '<div style="font-size:12px;color:#6b7280;margin-bottom:12px">配置多个 AI Provider，系统将并行调用并按五维评分选最优。endpoint 支持 OpenAI 兼容格式（如 https://api.openai.com/v1/chat/completions）。</div>';
+            var h = '<div style="font-size:12px;color:#6b7280;margin-bottom:12px">配置多个 Provider，系统将并行调用并按五维评分选最优。endpoint 支持 OpenAI 兼容格式（如 https://api.openai.com/v1/chat/completions）。</div>';
             WQ_AI_CONFIG.providers.forEach(function (p, i) {
                 h += '<div style="border:1px solid #e5e7eb;border-radius:8px;padding:12px;margin-bottom:10px;background:#fafafa">' +
                     '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">' +
@@ -7948,7 +7948,7 @@ var IndoorRouter = (function () {
         function saveWQAiConfig() {
             WQ_AI_CONFIG.enabled = document.getElementById("wqAiEnabled").checked;
             saveAiConfig();
-            showToast("✅ AI 配置已保存（" + enabledProviders().length + " 个 Provider 已启用）");
+            showToast("✅ 配置已保存（" + enabledProviders().length + " 个 Provider 已启用）");
             document.getElementById("wqAiCfgModal").style.display = "none";
         }
 
@@ -8844,11 +8844,11 @@ var IndoorRouter = (function () {
             var _backBtn = document.getElementById("wqBackToList");
             if (_backBtn) _backBtn.style.display = "none";
             var subjText = document.getElementById("wqSubjectText");
-            if (subjText) subjText.textContent = "AI分析中…";
+            if (subjText) subjText.textContent = "分析中…";
             var qtypeText = document.getElementById("wqQtypeText");
             if (qtypeText) qtypeText.textContent = "—";
             var kpBox = document.getElementById("wqKpTags");
-            if (kpBox) kpBox.innerHTML = '<span style="color:#94a3b8;font-size:12px">正在由AI识别知识点…</span>';
+            if (kpBox) kpBox.innerHTML = '<span style="color:#94a3b8;font-size:12px">正在识别知识点…</span>';
             var diffBox = document.getElementById("wqDiffStars");
             if (diffBox) diffBox.innerHTML = '<span style="color:#94a3b8;font-size:12px">评估中…</span>';
             document.getElementById("wqAiResult").style.display = "block";
@@ -8926,7 +8926,7 @@ var IndoorRouter = (function () {
         function runWQRuleFallback(text) {
             var aiBtn = document.getElementById("wqAiBtn");
             if (aiBtn) { aiBtn.disabled = false; aiBtn.textContent = "🔍 分析题目"; }
-            showToast("AI 响应超时，已切换为本地规则分析");
+            showToast("分析超时，已切换为本地规则分析");
             _wqOrigText = text;
             _wqSubject = detectSubject(text);
             _wqQtype = detectQType(text);
@@ -9600,7 +9600,7 @@ var IndoorRouter = (function () {
                     /* AI 讲解区：主内容。有 Provider 时异步加载，无 Provider 时提示配置 */
                     if (hasAi) {
                         dh += '<div id="wqAiExplainBox" style="margin-top:8px">' +
-                            '<div style="color:#8b5cf6;font-size:13px;padding:8px 0">📖 讲解生成中…</div>' +
+                            '<div style="color:#8b5cf6;font-size:13px;padding:8px 0">📖 讲解加载中…</div>' +
                             '</div>';
                     } else {
                         dh += '<div class="wq-deep-sec" style="background:#f0f9ff;border:1px solid #bae6fd;border-radius:8px;padding:10px 12px;color:#075985;font-size:13px;line-height:1.6">' +
@@ -9778,7 +9778,7 @@ var IndoorRouter = (function () {
                     var isTransfer = textSim(origText, q.text) < 0.4;
                     /* 归一化空白，避免 AI 输出带换行导致竖排 */
                     var qText = (q.text || "").replace(/[\r\n]+/g, " ").replace(/\s+/g, " ").trim();
-                    var genBadge = (q._generated || q._aiGenerated) ? '<span class="wq-transfer-tag" style="background:#8b5cf6" title="系统智能推荐">📝 推荐</span>' : '';
+                    var genBadge = (q._generated || q._aiGenerated) ? '<span class="wq-transfer-tag" style="background:#8b5cf6" title="系统推荐">📝 推荐</span>' : '';
                     var layerBadge = (q._layer) ? '<span class="wq-transfer-tag" style="background:#059669" title="难度层级">' + esc(q._layer) + '</span>' : '';
                     html += '<div class="wq-rec-card' + (mastered === true ? ' mastered' : '') + (mastered === false ? ' not-mastered' : '') + '">' +
                         '<div class="wq-rec-q">' +
@@ -9804,7 +9804,7 @@ var IndoorRouter = (function () {
                 var el = document.getElementById("wqRecList");
                 if (el) {
                     if (html) el.innerHTML = html;
-                    else if (isNonStandard) el.innerHTML = '<div style="color:#6366f1;padding:16px;text-align:center;font-size:13px;line-height:1.7">🤖 AI 正在围绕题目主题生成分层推荐题，请稍候…</div>';
+                    else if (isNonStandard) el.innerHTML = '<div style="color:#6366f1;padding:16px;text-align:center;font-size:13px;line-height:1.7">正在围绕题目主题生成分层推荐题，请稍候…</div>';
                     else el.innerHTML = '<div style="color:#64748b;padding:16px;text-align:center">已为你生成知识点拓展练习，请尝试完成</div>';
                 }
             }
@@ -9817,7 +9817,7 @@ var IndoorRouter = (function () {
                 /* 流式超时看门狗：20s 内无任何讲解输出则提示超时，避免永远"生成中" */
                 var explainWatchdog = setTimeout(function () {
                     var eb = document.getElementById("wqAiExplainBox");
-                    if (eb && eb.innerHTML.indexOf("讲解生成中") >= 0) {
+                    if (eb && eb.innerHTML.indexOf("讲解加载中") >= 0) {
                         eb.innerHTML = '<div style="color:#92400e;background:#fffbeb;border:1px solid #fde68a;border-radius:8px;padding:10px 12px;font-size:13px;margin-top:8px">' +
                             '⚠ 讲解生成超时，可能是网络较慢。请点击"重新分析"重试，或检查 AI 配置。' +
                             '</div>';
@@ -9847,7 +9847,7 @@ var IndoorRouter = (function () {
                             var mh = '<div class="wq-mother-card">' +
                                 '<div class="wq-mother-head"><span class="wq-mother-badge">母题溯源</span>' +
                                 '<span class="wq-mother-tip">追溯到「' + esc(_wqKps[0] || matchedKp || "该知识点") + '」的原型题，掌握它即可举一反三</span>' +
-                                '<span style="margin-left:8px;font-size:11px;color:#94a3b8">（智能溯源）</span></div>' +
+                                '<span style="margin-left:8px;font-size:11px;color:#94a3b8">（溯源）</span></div>' +
                                 '<div class="wq-mother-q">' + renderMath(decodeHtml(m.text)) + '</div>' +
                                 '<div class="wq-solution" style="display:none">' +
                                     '<div class="wq-sol-answer"><b>答案：</b>' + renderMath(decodeHtml(m.answer || "")) + '</div>' +
@@ -9893,8 +9893,8 @@ var IndoorRouter = (function () {
                             if (err) {
                                 console.warn("[Pipeline] AI pipeline error:", err);
                                 /* AI 失败时给用户明确提示，不让"生成中"永久卡住 */
-                                if (explBox && explBox.innerHTML.indexOf("讲解生成中") >= 0) {
-                                    explBox.innerHTML = '<div style="background:#fef2f2;border:1px solid #fecaca;border-radius:8px;padding:10px 12px;margin-top:8px;color:#991b1b;font-size:13px">⚠ 智能分析暂时不可用，请稍后重试。</div>';
+                                if (explBox && explBox.innerHTML.indexOf("讲解加载中") >= 0) {
+                                    explBox.innerHTML = '<div style="background:#fef2f2;border:1px solid #fecaca;border-radius:8px;padding:10px 12px;margin-top:8px;color:#991b1b;font-size:13px">⚠ 分析暂时不可用，请稍后重试。</div>';
                                 }
                                 var mEl2 = document.getElementById("wqMother");
                                 if (mEl2 && mEl2.innerHTML.indexOf("正在分析") >= 0) {
@@ -9902,7 +9902,7 @@ var IndoorRouter = (function () {
                                 }
                             } else {
                                 /* 流正常结束但讲解框仍显示"生成中"（AI返回空内容），给提示 */
-                                if (explBox && explBox.innerHTML.indexOf("讲解生成中") >= 0) {
+                                if (explBox && explBox.innerHTML.indexOf("讲解加载中") >= 0) {
                                     explBox.innerHTML = '<div style="background:#fffbeb;border:1px solid #fde68a;border-radius:8px;padding:10px 12px;margin-top:8px;color:#92400e;font-size:13px">⚠ 讲解内容为空，请点击"重新分析"重试。</div>';
                                 }
                             }
@@ -10165,12 +10165,12 @@ var IndoorRouter = (function () {
             var initFinal = initProg * w.program + userScore * w.user;
             if (isGood) {
                 if (initFinal >= minQ && targetQ) {
-                    showToast("👍 好问题（规则评分" + initFinal.toFixed(2) + "），正在用 智能复核权威性…");
+                    showToast("👍 好问题（规则评分" + initFinal.toFixed(2) + "），正在复核权威性…");
                 } else {
-                    showToast("👍 已记录为好问题（规则评分" + initFinal.toFixed(2) + "），智能复核中…");
+                    showToast("👍 已记录为好问题（规则评分" + initFinal.toFixed(2) + "），复核中…");
                 }
             } else {
-                showToast("👎 已记录为坏问题（规则评分" + initFinal.toFixed(2) + "），智能复核中…");
+                showToast("👎 已记录为坏问题（规则评分" + initFinal.toFixed(2) + "），复核中…");
             }
 
             /* AI 权威性评分（异步），返回后用最终评分决定是否入库 */
@@ -10191,19 +10191,19 @@ var IndoorRouter = (function () {
                                 var kp = (_wqKps && _wqKps.length) ? _wqKps[0] : "综合运用";
                                 targetQ.diff = targetQ.diff || 5;
                                 targetQ.kp = _wqKps;
-                                targetQ.source = "用户推荐-AI复核" + (aiRes ? ("(" + Math.round(aiRes.total * 100) + "分)") : "");
+                                targetQ.source = "用户推荐-复核" + (aiRes ? ("(" + Math.round(aiRes.total * 100) + "分)") : "");
                                 var stored = WQ_PIPELINE_B.storeQuestion(targetQ, sub, kp);
                                 WQ_PIPELINE_B.persistBank();
                                 if (stored) {
-                                    showToast("✅ 智能复核通过（综合" + finalScore.toFixed(2) + "），已加入题库！");
+                                    showToast("✅ 复核通过（综合" + finalScore.toFixed(2) + "），已加入题库！");
                                 } else {
-                                    showToast("👍 智能复核通过（综合" + finalScore.toFixed(2) + "），题库中已有类似题");
+                                    showToast("👍 复核通过（综合" + finalScore.toFixed(2) + "），题库中已有类似题");
                                 }
                             } else {
-                                showToast("👍 智能复核后综合评分" + finalScore.toFixed(2) + "，未达入库阈值(" + minQ + ")，已记录偏好");
+                                showToast("👍 复核后综合评分" + finalScore.toFixed(2) + "，未达入库阈值(" + minQ + ")，已记录偏好");
                             }
                         } else {
-                            showToast("👎 智能复核完成（综合" + finalScore.toFixed(2) + "），后续减少类似推荐");
+                            showToast("👎 复核完成（综合" + finalScore.toFixed(2) + "），后续减少类似推荐");
                         }
                         renderWQRecommend();
                     });
@@ -10342,7 +10342,7 @@ var IndoorRouter = (function () {
                 if ((parseInt(q.diff) || 0) < minDiff) continue;   /* 难度不达标直接跳过 */
                 var ruleScore = calcQuestionQuality(q);
                 if (ruleScore >= minQ) {
-                    q.source = "AI推荐自动入库(权重" + ruleScore.toFixed(2) + ")";
+                    q.source = "推荐自动入库(权重" + ruleScore.toFixed(2) + ")";
                     if (WQ_PIPELINE_B.storeQuestion(q, sub, kp)) autoStored++;
                 }
             }
@@ -10866,7 +10866,7 @@ var IndoorRouter = (function () {
                 aiVerifyAndAnswerQuestion(targetQ, function (err, aiRes) {
                     if (err || !aiRes) {
                         if (btn) { btn.disabled = false; btn.textContent = "⭐ 检验好题"; }
-                        showToast("AI 检验失败，请稍后重试");
+                        showToast("检验失败，请稍后重试");
                         return;
                     }
                     var aiScore = aiRes.total;
@@ -10906,7 +10906,7 @@ var IndoorRouter = (function () {
             } else {
                 /* 无 AI，仅用程序评分 */
                 if (ruleScore >= minQ) {
-                    showToast("AI未启用，仅程序评分" + ruleScore.toFixed(2) + "，无法生成标准答案，暂不上传");
+                    showToast("分析未启用，仅程序评分" + ruleScore.toFixed(2) + "，无法生成标准答案，暂不上传");
                 } else {
                     showToast("程序评分" + ruleScore.toFixed(2) + "未达标");
                 }
@@ -11062,7 +11062,7 @@ var IndoorRouter = (function () {
                     renderWQReviewQuizQuestion();
                 });
             } else {
-                showWQReviewQuizError("AI未启用，无法生成复习题");
+                showWQReviewQuizError("分析未启用，无法生成复习题");
             }
         }
         /* AI生成复习选择题 */
@@ -18688,13 +18688,13 @@ body.fire-mode #fireOverlay{display:flex}
   <div class="fb-modal-backdrop" data-close-wq></div>
   <div class="fb-modal-box" role="dialog" aria-label="录入错题">
     <button type="button" class="fb-modal-close" data-close-wq aria-label="关闭">✕</button>
-    <div class="fb-modal-title">📝 录入错题 · 智能推题</div>
+    <div class="fb-modal-title">📝 录入错题 · 推题</div>
 
     <!-- 图片上传 -->
     <div class="wq-upload">
       <label class="wq-upload-label" for="wqImgInput" id="wqImgLabel">
         <span class="wq-upload-icon">📷</span>
-        <span class="wq-upload-text">拍照或从图库选择错题图片（智能识别）</span>
+        <span class="wq-upload-text">拍照或从图库选择错题图片（识别）</span>
       </label>
       <input type="file" id="wqImgInput" accept="image/*" style="display:none">
       <div class="wq-img-preview" id="wqImgPreview" style="display:none">
@@ -18719,7 +18719,7 @@ body.fire-mode #fireOverlay{display:flex}
     <!-- 识别结果 -->
     <div class="wq-ai-result" id="wqAiResult" style="display:none">
       <div class="wq-ai-head">
-        <span class="wq-ai-title">🔍 智能分析</span>
+        <span class="wq-ai-title">🔍 分析</span>
         <div style="display:flex;gap:6px;align-items:center">
           <button type="button" id="wqBackToList" style="display:none;padding:4px 10px;background:#8b5cf6;color:#fff;border:none;border-radius:6px;font-size:12px;cursor:pointer">← 题目列表</button>
           <button type="button" id="wqAiRetry" class="wq-ai-retry">🔄 重新分析</button>
@@ -18855,13 +18855,13 @@ body.fire-mode #fireOverlay{display:flex}
 <div class="wq-dev-modal" id="wqAiCfgModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:9999;align-items:center;justify-content:center">
   <div style="background:#fff;width:92vw;max-width:720px;max-height:90vh;border-radius:12px;display:flex;flex-direction:column;overflow:hidden">
     <div style="display:flex;justify-content:space-between;align-items:center;padding:12px 16px;background:#5b21b6;color:#fff">
-      <b>⚙ AI Provider 配置</b>
+      <b>⚙ 分析服务配置</b>
       <button onclick="document.getElementById('wqAiCfgModal').style.display='none'" style="background:none;border:none;color:#fff;font-size:18px;cursor:pointer">✕</button>
     </div>
     <div id="wqAiCfgBody" style="flex:1;overflow-y:auto;padding:16px"></div>
     <div style="padding:12px 16px;border-top:1px solid #e5e7eb;display:flex;justify-content:space-between;background:#f9fafb">
       <label style="font-size:13px;display:flex;align-items:center;gap:6px">
-        <input type="checkbox" id="wqAiEnabled"> 启用智能赋能
+        <input type="checkbox" id="wqAiEnabled"> 启用分析功能
       </label>
       <div>
         <button onclick="saveWQAiConfig()" style="background:#5b21b6;color:#fff;border:none;padding:6px 16px;border-radius:6px;cursor:pointer">💾 保存</button>
