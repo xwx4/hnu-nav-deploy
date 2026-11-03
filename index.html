@@ -9553,37 +9553,107 @@ var IndoorRouter = (function () {
             };
         }
 
-        /* 关闭/保存时：将用户标记为好题的推荐题按权重入库
-         * 规则：用户点了👍 → 用程序评分*0.6 + 用户评分*0.4；
-         *       用户未评价 → 去除用户权重，仅用程序评分判断（但默认不自动入库，需用户主动👍） */
+        /* 关闭/保存时：自动上传好题到题库
+         * ① AI 推荐题自动扫描：每道推荐题用 calcQuestionQuality 评分，≥0.6 入库
+         * ② 用户标记👍的题：加权评分（规则*0.6 + 用户*0.4）≥0.6 入库
+         * ③ 原题：质量达标也入库（source 标记为"用户错题"）
+         * 权重不过关则不上传 */
         function finalizeWQGoodQuestions() {
-            if (!_wqMastery || !Object.keys(_wqMastery).length) return;
-            var recEls = document.querySelectorAll("#wqRecList .wq-rec-card");
             var w = WQ_AI_CONFIG.goodQuestionWeights || { program: 0.6, user: 0.4 };
-            for (var idx in _wqMastery) {
-                if (!_wqMastery[idx]) continue; /* 只处理标记为好的题 */
-                var targetQ = null;
-                for (var i = 0; i < recEls.length; i++) {
-                    var btn = recEls[i].querySelector('.wq-mastery-btn.ok');
-                    if (btn && btn.getAttribute("onclick") && btn.getAttribute("onclick").indexOf(idx) >= 0) {
-                        var qText = recEls[i].querySelector(".wq-rec-q").textContent || "";
-                        targetQ = { text: qText.trim(), diff: 5, kp: _wqKps, answer: "", solution: "", source: "用户推荐" };
-                        break;
-                    }
+            var sub = _wqSubject || "其他";
+            var kp = (_wqKps && _wqKps.length) ? _wqKps[0] : "综合运用";
+            var recEls = document.querySelectorAll("#wqRecList .wq-rec-card");
+            var autoStored = 0, userStored = 0;
+
+            /* 辅助：从推荐卡片提取完整题目数据（题干/难度/知识点/四要素解析） */
+            function extractQFromCard(card) {
+                var textEl = card.querySelector(".wq-rec-q-text");
+                if (!textEl) return null;
+                var text = (textEl.textContent || "").replace(/\s+/g, " ").trim();
+                if (!text) return null;
+                /* 难度：从 .wq-diffbar-text 的 "Ln" 解析 */
+                var diff = 5;
+                var diffText = card.querySelector(".wq-diffbar-text");
+                if (diffText) {
+                    var m = (diffText.textContent || "").match(/L(\d+)/);
+                    if (m) diff = parseInt(m[1]) || 5;
                 }
-                if (!targetQ) continue;
-                var ruleScore = calcQuestionQuality(targetQ);
-                /* 用户已评价为好，userScore=1；综合评分 = 规则*0.6 + 1*0.4 */
-                var finalScore = ruleScore * w.program + 1 * w.user;
-                if (finalScore >= 0.6) {
-                    var sub = _wqSubject || "其他";
-                    var kp = (_wqKps && _wqKps.length) ? _wqKps[0] : "综合运用";
-                    targetQ.diff = targetQ.diff || 5;
-                    targetQ.kp = _wqKps;
-                    WQ_PIPELINE_B.storeQuestion(targetQ, sub, kp);
+                /* 知识点：优先卡片标签，回退 _wqKps */
+                var kps = [];
+                var kpTags = card.querySelectorAll(".wq-rec-kps .wq-kp-tag");
+                for (var ki = 0; ki < kpTags.length; ki++) {
+                    var kt = (kpTags[ki].textContent || "").trim();
+                    if (kt) kps.push(kt);
+                }
+                if (!kps.length && _wqKps && _wqKps.length) kps = _wqKps.slice();
+                /* 四要素解析：剥离标签前缀 */
+                var idea = "", answer = "", solution = "", pitfall = "";
+                var solDiv = card.querySelector(".wq-solution");
+                if (solDiv) {
+                    var ideaEl = solDiv.querySelector(".wq-sol-idea");
+                    if (ideaEl) idea = (ideaEl.textContent || "").replace(/^[^：:]*[：:]\s*/, "").trim();
+                    var ansEl = solDiv.querySelector(".wq-sol-answer");
+                    if (ansEl) answer = (ansEl.textContent || "").replace(/^[^：:]*[：:]\s*/, "").trim();
+                    var detEl = solDiv.querySelector(".wq-sol-detail");
+                    if (detEl) solution = (detEl.textContent || "").replace(/^[^：:]*[：:]\s*/, "").trim();
+                    var pitEl = solDiv.querySelector(".wq-sol-pitfall");
+                    if (pitEl) pitfall = (pitEl.textContent || "").replace(/^[^：:]*[：:]\s*/, "").trim();
+                }
+                return { text: text, diff: diff, kp: kps, answer: answer, solution: solution, idea: idea, pitfall: pitfall };
+            }
+
+            /* ① 自动上传：扫描所有 AI 推荐题，权重达标则入库 */
+            for (var i = 0; i < recEls.length; i++) {
+                var q = extractQFromCard(recEls[i]);
+                if (!q) continue;
+                var ruleScore = calcQuestionQuality(q);
+                if (ruleScore >= 0.6) {
+                    q.source = "AI推荐自动入库(权重" + ruleScore.toFixed(2) + ")";
+                    if (WQ_PIPELINE_B.storeQuestion(q, sub, kp)) autoStored++;
                 }
             }
-            try { WQ_PIPELINE_B.persistBank(); } catch (e) { /* 忽略持久化失败 */ }
+
+            /* ② 用户标记👍的题：加权评分（规则*0.6 + 用户*0.4） */
+            if (_wqMastery && Object.keys(_wqMastery).length) {
+                for (var idx in _wqMastery) {
+                    if (!_wqMastery[idx]) continue;
+                    var targetQ = null;
+                    for (var j = 0; j < recEls.length; j++) {
+                        var btn = recEls[j].querySelector('.wq-mastery-btn.ok');
+                        if (btn && btn.getAttribute("onclick") && btn.getAttribute("onclick").indexOf(idx) >= 0) {
+                            var qText = recEls[j].querySelector(".wq-rec-q").textContent || "";
+                            targetQ = { text: qText.trim(), diff: 5, kp: _wqKps, answer: "", solution: "", source: "用户推荐" };
+                            break;
+                        }
+                    }
+                    if (!targetQ) continue;
+                    var uRuleScore = calcQuestionQuality(targetQ);
+                    var finalScore = uRuleScore * w.program + 1 * w.user;
+                    if (finalScore >= 0.6) {
+                        targetQ.diff = targetQ.diff || 5;
+                        targetQ.kp = _wqKps;
+                        if (WQ_PIPELINE_B.storeQuestion(targetQ, sub, kp)) userStored++;
+                    }
+                }
+            }
+
+            /* ③ 原题自动入库：质量达标则收入题库 */
+            var origText = (document.getElementById("wqText") || {}).value || "";
+            if (origText.trim()) {
+                var origQ = { text: origText.trim(), diff: _wqDiff || 5, kp: _wqKps, answer: "", solution: "", source: "用户错题" };
+                var origScore = calcQuestionQuality(origQ);
+                if (origScore >= 0.6) {
+                    origQ.source = "用户错题(权重" + origScore.toFixed(2) + ")";
+                    if (WQ_PIPELINE_B.storeQuestion(origQ, sub, kp)) autoStored++;
+                }
+            }
+
+            if (autoStored || userStored) {
+                try { WQ_PIPELINE_B.persistBank(); } catch (e) { /* 忽略持久化失败 */ }
+                var msg = "📚 已自动入库 " + autoStored + " 道题";
+                if (userStored) msg += "（含用户标记 " + userStored + " 道）";
+                showToast(msg);
+            }
         }
 
         /* 从错题本恢复保存的完整分析面板（无需重新调用AI） */
@@ -9780,31 +9850,32 @@ var IndoorRouter = (function () {
 
         /* ============ 题库浏览窗口 ============ */
         var WQ_BANK_ADMIN_PWD = "hnu2024admin"; /* 管理员密码（简单校验，仅用于本地删减题库） */
-        function isBankAdmin() { return localStorage.getItem("wq_bank_admin") === "1"; }
+        function isBankAdmin() {
+            /* 统一使用主管理员模式会话（sessionStorage.floorLockAdminSess），
+             * 不再在题库内单独登录。兼容旧的 localStorage.wq_bank_admin 标记。 */
+            try {
+                if (window.sessionStorage && sessionStorage.getItem("floorLockAdminSess") === "ok") return true;
+            } catch (e) {}
+            return localStorage.getItem("wq_bank_admin") === "1";
+        }
         function openBankModal() {
             var modal = document.getElementById("wqBankModal");
             if (!modal) return;
             renderBankList("");
             modal.classList.add("show");
             modal.setAttribute("aria-hidden", "false");
-            /* 管理员按钮状态 */
+            /* 管理员状态：统一使用主管理员模式会话，不再单独登录 */
             var adminBtn = document.getElementById("wqBankAdminBtn");
             var monitorBtn = document.getElementById("wqBankMonitorBtn");
             var monitorPanel = document.getElementById("wqBankMonitorPanel");
-            if (adminBtn) {
-                if (isBankAdmin()) {
-                    adminBtn.textContent = "✅ 管理员（退出）";
-                    adminBtn.style.background = "#0f766e";
-                    if (monitorBtn) monitorBtn.style.display = "inline-block";
-                } else {
-                    adminBtn.textContent = "🔑 管理员登录";
-                    adminBtn.style.background = "#1f2937";
-                    if (monitorBtn) monitorBtn.style.display = "none";
-                    if (monitorPanel) monitorPanel.style.display = "none";
-                }
+            if (isBankAdmin()) {
+                if (adminBtn) { adminBtn.textContent = "🛡 管理员模式"; adminBtn.style.background = "#0f766e"; adminBtn.style.cursor = "default"; }
+                if (monitorBtn) monitorBtn.style.display = "inline-block";
+            } else {
+                if (adminBtn) { adminBtn.textContent = "🔐 非管理员"; adminBtn.style.background = "#94a3b8"; adminBtn.style.cursor = "default"; }
+                if (monitorBtn) monitorBtn.style.display = "none";
+                if (monitorPanel) monitorPanel.style.display = "none";
             }
-            var pwdRow = document.getElementById("wqBankPwdRow");
-            if (pwdRow) pwdRow.style.display = "none";
         }
         function closeBankModal() {
             var m = document.getElementById("wqBankModal");
@@ -9850,29 +9921,29 @@ var IndoorRouter = (function () {
                     (admin ? '<button class="wq-del" data-bankdel="' + encodeURIComponent(q.subject) + '||' + encodeURIComponent(q.kp) + '||' + encodeURIComponent(q.text) + '" style="flex-shrink:0;padding:6px 10px;font-size:13px">🗑 删除</button>' : '') +
                     '</div></div>';
             }).join("");
-            /* 点击题干展开/收起详情 */
-            box.querySelectorAll("[data-bankview]").forEach(function (el) {
-                el.addEventListener("click", function () {
-                    var idx = el.getAttribute("data-bankview");
+            /* 事件委托：点击题干区域展开/收起详情，点击删除按钮删除（互不干扰） */
+            box.onclick = function (e) {
+                var delBtn = e.target.closest("[data-bankdel]");
+                if (delBtn) {
+                    if (!admin) return;
+                    var parts = delBtn.getAttribute("data-bankdel").split("||");
+                    var sub = decodeURIComponent(parts[0] || ""), kp = decodeURIComponent(parts[1] || ""), txt = decodeURIComponent(parts[2] || "");
+                    if (confirm("确定从题库删除此题？")) {
+                        var ok = WQ_PIPELINE_B.removeQuestion(sub, kp, txt);
+                        showToast(ok ? "✅ 已删除" : "⚠ 删除失败");
+                        renderBankList(document.getElementById("wqBankSearch").value);
+                    }
+                    return;
+                }
+                var view = e.target.closest("[data-bankview]");
+                if (view) {
+                    var idx = view.getAttribute("data-bankview");
                     var det = document.getElementById("bankq_" + idx + "_detail");
                     if (det) {
                         det.style.display = det.style.display === "none" ? "block" : "none";
                     }
-                });
-            });
-            if (admin) {
-                box.querySelectorAll("[data-bankdel]").forEach(function (b) {
-                    b.addEventListener("click", function () {
-                        var parts = b.getAttribute("data-bankdel").split("||");
-                        var sub = decodeURIComponent(parts[0] || ""), kp = decodeURIComponent(parts[1] || ""), txt = decodeURIComponent(parts[2] || "");
-                        if (confirm("确定从题库删除此题？")) {
-                            var ok = WQ_PIPELINE_B.removeQuestion(sub, kp, txt);
-                            showToast(ok ? "✅ 已删除" : "⚠ 删除失败");
-                            renderBankList(document.getElementById("wqBankSearch").value);
-                        }
-                    });
-                });
-            }
+                }
+            };
         }
 
         /* ================================================================
@@ -14222,7 +14293,19 @@ var currentIndoorBld = null;   // 当前进入楼内导航的楼栋（BUILDINGS 
                     b.href = resolveNormalUrl();
                     b.textContent = "← 返回普通模式";
                     back.appendChild(b);
-                    /* S5.3 埋点数据面板入口（仅管理员模式可见） */
+                    /* 退出管理员登录：清除会话，返回普通模式 */
+                    var lo = document.createElement("a");
+                    lo.href = "javascript:void(0)";
+                    lo.textContent = "🚪 退出登录";
+                    lo.style.marginLeft = "14px";
+                    lo.style.color = "#dc2626";
+                    lo.addEventListener("click", function () {
+                        try { sessionStorage.removeItem("floorLockAdminSess"); } catch (e) {}
+                        try { localStorage.removeItem("wq_bank_admin"); } catch (e) {}
+                        window.location.href = resolveNormalUrl();
+                    });
+                    back.appendChild(lo);
+                    /* 埋点数据面板入口（仅管理员模式可见） */
                     var tb = document.createElement("a");
                     tb.href = "javascript:void(0)";
                     tb.textContent = "📊 埋点数据";
@@ -14452,61 +14535,29 @@ var currentIndoorBld = null;   // 当前进入楼内导航的楼栋（BUILDINGS 
             var wqBankSearch = document.getElementById("wqBankSearch");
             if (wqBankSearch) wqBankSearch.addEventListener("input", function () { renderBankList(wqBankSearch.value); });
             var wqBankAdminBtn = document.getElementById("wqBankAdminBtn");
-            var wqBankPwdRow = document.getElementById("wqBankPwdRow");
-            var wqBankPwdInput = document.getElementById("wqBankPwdInput");
             var wqBankMonitorBtn = document.getElementById("wqBankMonitorBtn");
             var wqBankMonitorPanel = document.getElementById("wqBankMonitorPanel");
             var wqBankMonitorRefresh = document.getElementById("wqBankMonitorRefresh");
             function refreshBankAdminUI() {
                 if (isBankAdmin()) {
-                    wqBankAdminBtn.textContent = "✅ 管理员（退出）";
-                    wqBankAdminBtn.style.background = "#0f766e";
-                    if (wqBankPwdRow) wqBankPwdRow.style.display = "none";
-                    if (wqBankPwdInput) wqBankPwdInput.value = "";
+                    if (wqBankAdminBtn) { wqBankAdminBtn.textContent = "🛡 管理员模式"; wqBankAdminBtn.style.background = "#0f766e"; }
                     if (wqBankMonitorBtn) wqBankMonitorBtn.style.display = "inline-block";
                 } else {
-                    wqBankAdminBtn.textContent = "🔑 管理员登录";
-                    wqBankAdminBtn.style.background = "#1f2937";
+                    if (wqBankAdminBtn) { wqBankAdminBtn.textContent = "🔐 非管理员"; wqBankAdminBtn.style.background = "#94a3b8"; }
                     if (wqBankMonitorBtn) wqBankMonitorBtn.style.display = "none";
                     if (wqBankMonitorPanel) wqBankMonitorPanel.style.display = "none";
                 }
             }
             if (wqBankMonitorBtn) wqBankMonitorBtn.addEventListener("click", toggleBankMonitor);
             if (wqBankMonitorRefresh) wqBankMonitorRefresh.addEventListener("click", loadBankMonitor);
+            /* 管理员按钮：仅作状态展示，不再单独登录（统一走主管理员模式入口） */
             if (wqBankAdminBtn) wqBankAdminBtn.addEventListener("click", function () {
                 if (isBankAdmin()) {
-                    localStorage.removeItem("wq_bank_admin");
-                    refreshBankAdminUI();
-                    renderBankList(wqBankSearch ? wqBankSearch.value : "");
-                    showToast("已退出管理员");
+                    showToast("请在页面顶部「管理员模式」中退出登录");
                 } else {
-                    if (wqBankPwdRow) {
-                        wqBankPwdRow.style.display = "flex";
-                        if (wqBankPwdInput) { wqBankPwdInput.value = ""; wqBankPwdInput.focus(); }
-                    }
+                    showToast("请通过页面顶部「管理员模式」入口登录");
                 }
             });
-            /* 密码校验：回车或点登录按钮 */
-            function tryBankAdminLogin() {
-                var inp = document.getElementById("wqBankPwdInput");
-                if (!inp) return;
-                if (inp.value === WQ_BANK_ADMIN_PWD) {
-                    localStorage.setItem("wq_bank_admin", "1");
-                    refreshBankAdminUI();
-                    var searchEl = document.getElementById("wqBankSearch");
-                    renderBankList(searchEl ? searchEl.value : "");
-                    showToast("✅ 管理员登录成功，可删除题库题目");
-                } else {
-                    showToast("❌ 密码错误");
-                    inp.value = "";
-                    inp.focus();
-                }
-            }
-            if (wqBankPwdInput) wqBankPwdInput.addEventListener("keydown", function (e) {
-                if (e.key === "Enter") { e.preventDefault(); tryBankAdminLogin(); }
-            });
-            var wqBankPwdSubmit = document.getElementById("wqBankPwdSubmit");
-            if (wqBankPwdSubmit) wqBankPwdSubmit.addEventListener("click", tryBankAdminLogin);
             var wqAdd = document.getElementById("wqAddBtn");
             if (wqAdd) wqAdd.addEventListener("click", function () { closeWQList(); openWQ(); });
             var wqAi = document.getElementById("wqAiBtn");
@@ -18024,10 +18075,6 @@ body.fire-mode #fireOverlay{display:flex}
         <button type="button" id="wqBankAdminBtn" style="padding:8px 14px;background:#1f2937;color:#fff;border:none;border-radius:8px;font-size:13px;cursor:pointer;white-space:nowrap">🔑 管理员登录</button>
         <button type="button" id="wqBankMonitorBtn" style="display:none;padding:8px 14px;background:#8b5cf6;color:#fff;border:none;border-radius:8px;font-size:13px;cursor:pointer;white-space:nowrap">📊 动向监控</button>
       </div>
-    </div>
-    <div id="wqBankPwdRow" style="display:none;padding:0 16px 8px;gap:6px;align-items:center">
-      <input type="password" id="wqBankPwdInput" placeholder="输入管理员密码" style="flex:1;padding:10px 12px;border:1px solid #e2e8f0;border-radius:8px;font-size:15px;outline:none;width:100%">
-      <button type="button" id="wqBankPwdSubmit" style="padding:10px 16px;background:#1f2937;color:#fff;border:none;border-radius:8px;font-size:14px;cursor:pointer;white-space:nowrap">登录</button>
     </div>
     <!-- 开发者动向监控面板（仅管理员可见） -->
     <div id="wqBankMonitorPanel" style="display:none;padding:0 16px 12px">
