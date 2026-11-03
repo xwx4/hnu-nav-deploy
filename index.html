@@ -7219,6 +7219,15 @@ var IndoorRouter = (function () {
                     if (timedOut) return;
                     clearTimeout(timer);
                     if (!r.ok) throw new Error("HTTP " + r.status);
+                    /* 如果响应不是 SSE，直接当 JSON 处理（某些上游不支持 stream） */
+                    var ct = r.headers.get("content-type") || "";
+                    if (ct.indexOf("text/event-stream") < 0) {
+                        return r.json().then(function (data) {
+                            var text = (data && (data.text || data.answer || (data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content))) || "";
+                            if (text && onChunk) onChunk(text, text);
+                            cb(null, text);
+                        });
+                    }
                     var reader = r.body.getReader();
                     var decoder = new TextDecoder();
                     var buffer = "";
@@ -7227,7 +7236,18 @@ var IndoorRouter = (function () {
                         if (timedOut) return;
                         reader.read().then(function (result) {
                             if (timedOut) return;
-                            if (result.done) { cb(null, fullText); return; }
+                            if (result.done) {
+                                /* 流结束但没解析到内容：尝试把 buffer 当 JSON 解析（上游可能没发 data: 前缀） */
+                                if (!fullText && buffer.trim()) {
+                                    try {
+                                        var obj = JSON.parse(buffer.trim());
+                                        var c = obj.choices && obj.choices[0] && obj.choices[0].message && obj.choices[0].message.content;
+                                        if (c) { fullText = c; if (onChunk) onChunk(c, c); }
+                                    } catch (e) {}
+                                }
+                                cb(null, fullText);
+                                return;
+                            }
                             buffer += decoder.decode(result.value, { stream: true });
                             var lines = buffer.split("\n");
                             buffer = lines.pop();
@@ -8767,7 +8787,14 @@ var IndoorRouter = (function () {
             renderWQErrorSelector();
             document.getElementById("wqAiResult").style.display = "block";
             /* 立即启动讲解流式输出（不等AI分析），保证秒级体感 */
-            renderWQRecommend();
+            try {
+                renderWQRecommend();
+            } catch (e) {
+                console.error("[WQ] renderWQRecommend error:", e);
+                var explBox = document.getElementById("wqAiExplainBox");
+                if (explBox) explBox.innerHTML = '<div style="color:#991b1b;font-size:13px;padding:8px">⚠ 渲染出错：' + esc(e.message) + '</div>';
+            }
+            /* 按钮始终重置，避免卡死在"分析中" */
             if (aiBtn) { aiBtn.disabled = false; aiBtn.textContent = "🔍 分析题目"; }
 
             /* === 后台 AI 精修：异步优化学科/知识点/难度，检测多题 === */
@@ -9699,10 +9726,20 @@ var IndoorRouter = (function () {
             /* ---- 一站式智能分析（流式）：讲解→母题→推荐题 逐段秒级呈现 ---- */
             /* 多题模式下由 analyzeMultiQuestion 统一调度 pipeline，此处跳过避免重复 */
             if (!_wqMultiQuestions && enabledProviders().length && origText.trim()) {
+                /* 流式超时看门狗：20s 内无任何讲解输出则提示超时，避免永远"生成中" */
+                var explainWatchdog = setTimeout(function () {
+                    var eb = document.getElementById("wqAiExplainBox");
+                    if (eb && eb.innerHTML.indexOf("讲解生成中") >= 0) {
+                        eb.innerHTML = '<div style="color:#92400e;background:#fffbeb;border:1px solid #fde68a;border-radius:8px;padding:10px 12px;font-size:13px;margin-top:8px">' +
+                            '⚠ 讲解生成超时，可能是网络较慢。请点击"重新分析"重试，或检查 AI 配置。' +
+                            '</div>';
+                    }
+                }, 20000);
                 try {
                     aiFullPipeline(origText, sub, _wqKps, origDiff, {
                         /* ① 讲解：流式逐字渲染，首字秒级呈现 */
                         onExplain: function (text) {
+                            if (explainWatchdog) { clearTimeout(explainWatchdog); explainWatchdog = null; }
                             var explBox = document.getElementById("wqAiExplainBox");
                             if (explBox) {
                                 explBox.innerHTML = '<div style="background:#f5f3ff;border:1px solid #ddd6fe;border-radius:8px;padding:10px 12px;margin-top:8px">' +
@@ -9759,16 +9796,22 @@ var IndoorRouter = (function () {
                             paintRecs(aiRecs.slice(0, 6));
                         },
                         onDone: function (err) {
+                            if (explainWatchdog) { clearTimeout(explainWatchdog); explainWatchdog = null; }
+                            var explBox = document.getElementById("wqAiExplainBox");
                             if (err) {
                                 console.warn("[Pipeline] AI pipeline error:", err);
                                 /* AI 失败时给用户明确提示，不让"生成中"永久卡住 */
-                                var explBox = document.getElementById("wqAiExplainBox");
                                 if (explBox && explBox.innerHTML.indexOf("讲解生成中") >= 0) {
                                     explBox.innerHTML = '<div style="background:#fef2f2;border:1px solid #fecaca;border-radius:8px;padding:10px 12px;margin-top:8px;color:#991b1b;font-size:13px">⚠ 智能分析暂时不可用，请稍后重试。</div>';
                                 }
                                 var mEl2 = document.getElementById("wqMother");
                                 if (mEl2 && mEl2.innerHTML.indexOf("正在分析") >= 0) {
                                     mEl2.innerHTML = '<div class="wq-mother-empty" style="color:#991b1b">⚠ 母题溯源暂时不可用，请稍后重试。</div>';
+                                }
+                            } else {
+                                /* 流正常结束但讲解框仍显示"生成中"（AI返回空内容），给提示 */
+                                if (explBox && explBox.innerHTML.indexOf("讲解生成中") >= 0) {
+                                    explBox.innerHTML = '<div style="background:#fffbeb;border:1px solid #fde68a;border-radius:8px;padding:10px 12px;margin-top:8px;color:#92400e;font-size:13px">⚠ 讲解内容为空，请点击"重新分析"重试。</div>';
                                 }
                             }
                         }
