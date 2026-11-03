@@ -7681,7 +7681,8 @@ var IndoorRouter = (function () {
 
             function parseMotherBlock(raw) {
                 var m = { text: "", answer: "", kpExplain: "", relation: "" };
-                var lines = raw.split(/\n/);
+                /* 还原字面 \\n 为真换行，再按行解析 */
+                var lines = String(raw).replace(/\\r\\n/g, "\n").replace(/\\n/g, "\n").replace(/\\r/g, "\n").split(/\n/);
                 var cur = "";
                 for (var i = 0; i < lines.length; i++) {
                     var ln = lines[i];
@@ -7700,7 +7701,23 @@ var IndoorRouter = (function () {
                     var m = raw.match(/\[[\s\S]*\]/);
                     if (m) recs = JSON.parse(m[0]);
                 } catch (e) {}
-                return Array.isArray(recs) ? recs.filter(function (r) { return r && r.text; }) : [];
+                if (!Array.isArray(recs)) return [];
+                /* 清理：AI 可能把换行写成字面 \\n（双重转义），统一还原为真换行；
+                   题干压缩为单行，答案/解析保留换行语义供渲染时转 <br> */
+                recs = recs.filter(function (r) { return r && r.text; }).map(function (r) {
+                    var fix = function (s) {
+                        if (typeof s !== "string") return s;
+                        return s.replace(/\\r\\n/g, "\n").replace(/\\n/g, "\n").replace(/\\r/g, "\n").replace(/\\t/g, "\t");
+                    };
+                    r.text = fix(r.text).replace(/[\r\n]+/g, " ").replace(/\s+/g, " ").trim();
+                    r.answer = fix(r.answer);
+                    r.solution = fix(r.solution);
+                    if (r.idea) r.idea = fix(r.idea);
+                    if (r.pitfall) r.pitfall = fix(r.pitfall);
+                    if (r.method) r.method = fix(r.method);
+                    return r;
+                });
+                return recs;
             }
         }
 
@@ -9133,7 +9150,7 @@ var IndoorRouter = (function () {
                         if (mEl && m && m.text) {
                             var mh = '<div class="wq-mother-card"><div class="wq-mother-head"><span class="wq-mother-badge">母题溯源</span><span class="wq-mother-tip">追溯到「' + esc((q.kps && q.kps[0]) || "该知识点") + '」的原型题</span></div>' +
                                 '<div class="wq-mother-q">' + renderMath(decodeHtml(m.text)) + '</div>' +
-                                '<div class="wq-solution" style="display:none"><div class="wq-sol-answer"><b>答案：</b>' + renderMath(decodeHtml(m.answer || "")) + '</div></div>' +
+                                '<div class="wq-solution" style="display:none"><div class="wq-sol-answer"><b>答案：</b>' + (function(s){return String(s).replace(/\r\n/g,"\n").replace(/\n/g,"<br>");})(renderMath(decodeHtml(m.answer || ""))) + '</div></div>' +
                                 '<button class="wq-toggle-sol" onclick="var s=this.previousElementSibling;s.style.display=s.style.display===\'block\'?\'none\':\'block\';this.textContent=s.style.display===\'block\'?\'▼ 收起\':\'▶ 查看答案\'">▶ 查看答案</button></div>';
                             mEl.innerHTML = mh;
                         }
@@ -9218,12 +9235,14 @@ var IndoorRouter = (function () {
 
         /* 四要素解析渲染：思路/答案/解答/易错/方法 */
         function renderSolutionParts(q) {
+            /* 换行符转 <br>：在 renderMath 之后替换，避免被 esc 转义 */
+            var nl2br = function (s) { return String(s).replace(/\r\n/g, "\n").replace(/\n/g, "<br>"); };
             var html = '<div class="wq-solution" style="display:none">';
-            if (q.idea) html += '<div class="wq-sol-idea">🧭 <b>思路分析：</b>' + renderMath(q.idea) + '</div>';
-            html += '<div class="wq-sol-answer"><b>答案：</b>' + renderMath(q.answer || "（略）") + '</div>';
-            html += '<div class="wq-sol-detail"><b>解答：</b>' + renderMath(q.solution || "（略）") + '</div>';
-            if (q.pitfall) html += '<div class="wq-sol-pitfall">⚠️ <b>易错点：</b>' + renderMath(q.pitfall) + '</div>';
-            if (q.method) html += '<div class="wq-sol-method">📌 <b>方法归纳：</b>' + renderMath(q.method) + '</div>';
+            if (q.idea) html += '<div class="wq-sol-idea">🧭 <b>思路分析：</b>' + nl2br(renderMath(q.idea)) + '</div>';
+            html += '<div class="wq-sol-answer"><b>答案：</b>' + nl2br(renderMath(q.answer || "（略）")) + '</div>';
+            html += '<div class="wq-sol-detail"><b>解答：</b>' + nl2br(renderMath(q.solution || "（略）")) + '</div>';
+            if (q.pitfall) html += '<div class="wq-sol-pitfall">⚠️ <b>易错点：</b>' + nl2br(renderMath(q.pitfall)) + '</div>';
+            if (q.method) html += '<div class="wq-sol-method">📌 <b>方法归纳：</b>' + nl2br(renderMath(q.method)) + '</div>';
             html += '</div>';
             return html;
         }
@@ -9850,7 +9869,7 @@ var IndoorRouter = (function () {
                                 '<span style="margin-left:8px;font-size:11px;color:#94a3b8">（溯源）</span></div>' +
                                 '<div class="wq-mother-q">' + renderMath(decodeHtml(m.text)) + '</div>' +
                                 '<div class="wq-solution" style="display:none">' +
-                                    '<div class="wq-sol-answer"><b>答案：</b>' + renderMath(decodeHtml(m.answer || "")) + '</div>' +
+                                    '<div class="wq-sol-answer"><b>答案：</b>' + (function(s){return String(s).replace(/\r\n/g,"\n").replace(/\n/g,"<br>");})(renderMath(decodeHtml(m.answer || ""))) + '</div>' +
                                 '</div>' +
                                 '<button class="wq-toggle-sol" onclick="var s=this.previousElementSibling;s.style.display=s.style.display===\'block\'?\'none\':\'block\';this.textContent=s.style.display===\'block\'?\'▼ 收起\':\'▶ 查看答案\'">▶ 查看答案</button>';
                             if (m.kpExplain) {
