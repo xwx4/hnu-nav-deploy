@@ -1858,6 +1858,7 @@ window.__FLOOR_IMAGES["5F"] = "data:image/svg+xml;base64,77u/PHN2ZyB3aWR0aD0iNTA
   var EVENT_NOTICE = 'floor-notice';      // 楼层公告变更（解锁后展示）
   var LOG_KEY = 'floorLockSecurityLog';   // 安全日志：密码错误记录（独立 key，不碰楼层配置）
   var LOG_MAX = 10;                       // 只保留最近 10 条
+  var MASTER_KEY_HASH = '92925488b28ab12584ac8fcaa8a27a0f497b2c62940c8f4fbc8ef19ebc87c43e'; // 管理员密码 SHA-256
 
   // 默认配置：1F-5F，全部不加密。可在加载本 JS 之前覆盖 window.FLOOR_LOCK_DEFAULTS。
   function buildDefaultConfig() {
@@ -2631,21 +2632,29 @@ window.__FLOOR_IMAGES["5F"] = "data:image/svg+xml;base64,77u/PHN2ZyB3aWR0aD0iNTA
       function submitPin() {
         var v = pin.value;
         if (!v) { msg.textContent = '请输入管理员密码。'; pin.focus(); return; }
-        /* 统一使用固定管理员密码（与主登录弹窗 MASTER_KEY 一致） */
-        if (v === '888888') {
-          adminState.gateTries = 0;
-          markAdminSession();
-          renderAdmin();
-        } else {
-          adminState.gateTries++;
-          if (adminState.gateTries >= 5) {
-            goBtn.disabled = true; pin.disabled = true;
-            msg.textContent = '错误次数过多，请关闭页面后重试。';
-            return;
+        goBtn.disabled = true; pin.disabled = true;
+        msg.textContent = '验证中…';
+        /* SHA-256 哈希比对固定管理员密码（不存明文） */
+        hashAsync(v).then(function (hash) {
+          goBtn.disabled = false; pin.disabled = false;
+          if (hash === 'sha256:' + MASTER_KEY_HASH) {
+            adminState.gateTries = 0;
+            markAdminSession();
+            renderAdmin();
+          } else {
+            adminState.gateTries++;
+            if (adminState.gateTries >= 5) {
+              goBtn.disabled = true; pin.disabled = true;
+              msg.textContent = '错误次数过多，请关闭页面后重试。';
+              return;
+            }
+            msg.textContent = '密码错误，还可尝试 ' + (5 - adminState.gateTries) + ' 次。';
+            pin.value = ''; pin.focus();
           }
-          msg.textContent = '密码错误，还可尝试 ' + (5 - adminState.gateTries) + ' 次。';
-          pin.value = ''; pin.focus();
-        }
+        }).catch(function () {
+          goBtn.disabled = false; pin.disabled = false;
+          msg.textContent = '当前环境不支持密码校验，请使用现代浏览器。';
+        });
       }
       goBtn.addEventListener('click', submitPin);
       pin.addEventListener('keydown', function (e) {
@@ -6500,6 +6509,13 @@ var IndoorRouter = (function () {
             /* ⑤ 去重入库 */
             storeQuestion: function (q, subject, kp) {
                 var self = this;
+                /* 精英化门槛：难度必须 ≥ bankMinDiff（高中顶级），否则拒收 */
+                var minDiff = WQ_AI_CONFIG.bankMinDiff || 7;
+                var d = parseInt(q.diff) || 0;
+                if (d < minDiff) {
+                    self.log("拒收（难度" + d + " < 门槛" + minDiff + "）：" + (q.text || "").slice(0, 20));
+                    return false;
+                }
                 var sub = subject || q.subject || "其他";
                 var targetKp = kp || (q.kps && q.kps.length ? q.kps[0] : "综合运用");
                 if (!WQ_BANK[sub]) WQ_BANK[sub] = {};
@@ -6578,11 +6594,12 @@ var IndoorRouter = (function () {
             /* 从 localStorage 加载扩展题库并合并入 WQ_BANK */
             loadExtraBank: function () {
                 var self = this;
+                var minDiff = WQ_AI_CONFIG.bankMinDiff || 7;
                 try {
                     var raw = localStorage.getItem("wq_bank_extra");
                     if (!raw) return 0;
                     var extra = JSON.parse(raw);
-                    var cnt = 0;
+                    var cnt = 0, skipped = 0;
                     for (var sub in extra) {
                         if (!WQ_BANK[sub]) WQ_BANK[sub] = {};
                         for (var kp in extra[sub]) {
@@ -6591,6 +6608,8 @@ var IndoorRouter = (function () {
                             node.questions = node.questions || [];
                             var extQs = extra[sub][kp].questions || [];
                             for (var i = 0; i < extQs.length; i++) {
+                                /* 精英化：不加载低难度扩展题 */
+                                if ((parseInt(extQs[i].diff) || 0) < minDiff) { skipped++; continue; }
                                 var dup = false;
                                 for (var j = 0; j < node.questions.length; j++) {
                                     if (textSim(extQs[i].text, node.questions[j].text) > self.config.dedupSimThreshold) { dup = true; break; }
@@ -6599,9 +6618,31 @@ var IndoorRouter = (function () {
                             }
                         }
                     }
-                    self.log("加载扩展题库 " + cnt + " 道");
+                    self.log("加载扩展题库 " + cnt + " 道" + (skipped ? "（剔除低难度 " + skipped + " 道）" : ""));
                     return cnt;
                 } catch (e) { self.log("加载扩展题库失败：" + e.message); return 0; }
+            },
+
+            /* 精英化清理：从 WQ_BANK 中移除所有难度 < bankMinDiff 的题（内置+扩展） */
+            purgeLowDiffQuestions: function () {
+                var self = this;
+                var minDiff = WQ_AI_CONFIG.bankMinDiff || 7;
+                var removed = 0;
+                for (var sub in WQ_BANK) {
+                    for (var kp in WQ_BANK[sub]) {
+                        var node = WQ_BANK[sub][kp];
+                        var before = (node.questions || []).length;
+                        node.questions = (node.questions || []).filter(function (q) {
+                            return (parseInt(q.diff) || 0) >= minDiff;
+                        });
+                        removed += before - node.questions.length;
+                    }
+                }
+                if (removed > 0) {
+                    self.log("精英化清理：移除低难度题 " + removed + " 道（门槛 diff≥" + minDiff + "）");
+                    try { self.persistBank(); } catch (e) { /* 忽略 */ }
+                }
+                return removed;
             },
 
             /* 自动更新时间戳 */
@@ -6657,11 +6698,14 @@ var IndoorRouter = (function () {
             /* 获取题库中所有题目列表（用于展示） */
             getAllQuestions: function () {
                 var all = [];
+                var minDiff = WQ_AI_CONFIG.bankMinDiff || 7;
                 for (var sub in WQ_BANK) {
                     for (var kp in WQ_BANK[sub]) {
                         var node = WQ_BANK[sub][kp];
                         var qs = (node.questions || []).slice();
                         for (var i = 0; i < qs.length; i++) {
+                            /* 精英化：只展示难度 ≥ bankMinDiff（高中顶级）的题 */
+                            if ((parseInt(qs[i].diff) || 0) < minDiff) continue;
                             all.push({
                                 subject: sub, kp: kp,
                                 text: qs[i].text, answer: qs[i].answer,
@@ -6696,6 +6740,8 @@ var IndoorRouter = (function () {
                                 node.questions = node.questions || [];
                                 var extQs = (shared[sub][kp].questions || []);
                                 for (var i = 0; i < extQs.length; i++) {
+                                    /* 精英化：共享题库也只收难度 ≥ bankMinDiff 的题 */
+                                    if ((parseInt(extQs[i].diff) || 0) < (WQ_AI_CONFIG.bankMinDiff || 7)) continue;
                                     var dup = false;
                                     for (var j = 0; j < node.questions.length; j++) {
                                         if (textSim(extQs[i].text, node.questions[j].text) > WQ_PIPELINE_B.config.dedupSimThreshold) { dup = true; break; }
@@ -6806,6 +6852,9 @@ var IndoorRouter = (function () {
             },
             /* 好题判定权重：程序评分60% + 用户投票40% */
             goodQuestionWeights: { program: 0.6, user: 0.4 },
+            /* 题库精英化门槛：只有质量≥0.75 且 难度≥7（高中顶级）的题才能入选 */
+            bankMinQuality: 0.75,
+            bankMinDiff: 7,
             /* 题库质量评分权重：AI(0.4) + 答案可验证(0.3) + 来源权威(0.2) + 去重(0.1) */
             qualityWeights: { ai: 0.4, answer: 0.3, source: 0.2, dedup: 0.1 },
             /* 超时（ms） */
@@ -9374,14 +9423,16 @@ var IndoorRouter = (function () {
         function calcQuestionQuality(q) {
             if (!q || !q.text) return 0;
             var score = 0;
-            /* 答案完整度（0.3） */
+            /* 答案完整度（0.25） */
             var ans = (q.answer || "").trim();
             var sol = (q.solution || "").trim();
-            if (ans.length > 2) score += 0.15;
-            if (sol.length > 10) score += 0.15;
-            /* 难度合理（0.2）：1-10 之间 */
+            if (ans.length > 2) score += 0.12;
+            if (sol.length > 10) score += 0.13;
+            /* 难度深度（0.25）：鼓励高难度、有探索性的题；简单题低分劝退 */
             var d = parseInt(q.diff) || 0;
-            if (d >= 1 && d <= 10) score += 0.2;
+            if (d >= 7) score += 0.25;           /* 高中顶级及以上：满分 */
+            else if (d >= 5) score += 0.12;      /* 中等：部分分 */
+            else if (d >= 1) score += 0.04;      /* 简单：仅少量分 */
             /* 知识点覆盖（0.2） */
             if (q.kp && q.kp.length) score += 0.2;
             /* 题面长度合理（0.15） */
@@ -9412,11 +9463,12 @@ var IndoorRouter = (function () {
             var ruleScore = targetQ ? calcQuestionQuality(targetQ) : 0.5;
             var userScore = isGood ? 1 : 0;
             var w = WQ_AI_CONFIG.goodQuestionWeights || { program: 0.6, user: 0.4 };
+            var minQ = WQ_AI_CONFIG.bankMinQuality || 0.75;
             /* 先用规则评分给出即时反馈 */
             var initProg = ruleScore;
             var initFinal = initProg * w.program + userScore * w.user;
             if (isGood) {
-                if (initFinal >= 0.6 && targetQ) {
+                if (initFinal >= minQ && targetQ) {
                     showToast("👍 好问题（规则评分" + initFinal.toFixed(2) + "），正在用 智能复核权威性…");
                 } else {
                     showToast("👍 已记录为好问题（规则评分" + initFinal.toFixed(2) + "），智能复核中…");
@@ -9438,7 +9490,7 @@ var IndoorRouter = (function () {
                         }
                         var finalScore = progScore * w.program + userScore * w.user;
                         if (isGood) {
-                            if (finalScore >= 0.6) {
+                            if (finalScore >= minQ) {
                                 var sub = _wqSubject || "其他";
                                 var kp = (_wqKps && _wqKps.length) ? _wqKps[0] : "综合运用";
                                 targetQ.diff = targetQ.diff || 5;
@@ -9452,7 +9504,7 @@ var IndoorRouter = (function () {
                                     showToast("👍 智能复核通过（综合" + finalScore.toFixed(2) + "），题库中已有类似题");
                                 }
                             } else {
-                                showToast("👍 智能复核后综合评分" + finalScore.toFixed(2) + "，未达入库阈值(0.6)，已记录偏好");
+                                showToast("👍 智能复核后综合评分" + finalScore.toFixed(2) + "，未达入库阈值(" + minQ + ")，已记录偏好");
                             }
                         } else {
                             showToast("👎 智能复核完成（综合" + finalScore.toFixed(2) + "），后续减少类似推荐");
@@ -9461,7 +9513,7 @@ var IndoorRouter = (function () {
                     });
                 } catch (e) {
                     /* AI 异常，用规则评分直接判断 */
-                    if (isGood && initFinal >= 0.6 && targetQ) {
+                    if (isGood && initFinal >= minQ && targetQ) {
                         var sub2 = _wqSubject || "其他";
                         var kp2 = (_wqKps && _wqKps.length) ? _wqKps[0] : "综合运用";
                         WQ_PIPELINE_B.storeQuestion(targetQ, sub2, kp2);
@@ -9471,7 +9523,7 @@ var IndoorRouter = (function () {
                 }
             } else {
                 /* 无 AI，直接用规则评分判断 */
-                if (isGood && initFinal >= 0.6 && targetQ) {
+                if (isGood && initFinal >= minQ && targetQ) {
                     var sub3 = _wqSubject || "其他";
                     var kp3 = (_wqKps && _wqKps.length) ? _wqKps[0] : "综合运用";
                     WQ_PIPELINE_B.storeQuestion(targetQ, sub3, kp3);
@@ -9534,13 +9586,15 @@ var IndoorRouter = (function () {
             };
         }
 
-        /* 关闭/保存时：自动上传好题到题库
-         * ① AI 推荐题自动扫描：每道推荐题用 calcQuestionQuality 评分，≥0.6 入库
-         * ② 用户标记👍的题：加权评分（规则*0.6 + 用户*0.4）≥0.6 入库
-         * ③ 原题：质量达标也入库（source 标记为"用户错题"）
-         * 权重不过关则不上传 */
+        /* 关闭/保存时：自动上传好题到题库（精英化门槛）
+         * ① AI 推荐题自动扫描：calcQuestionQuality ≥ bankMinQuality(0.75) 且 diff ≥ bankMinDiff(7) 才入库
+         * ② 用户标记👍的题：加权评分（规则*0.6 + 用户*0.4）≥ bankMinQuality 且 diff ≥ bankMinDiff 才入库
+         * ③ 原题：质量达标且难度达标也入库（source 标记为"用户错题"）
+         * 不达标则不上传 —— 题库只收精英题 */
         function finalizeWQGoodQuestions() {
             var w = WQ_AI_CONFIG.goodQuestionWeights || { program: 0.6, user: 0.4 };
+            var minQ = WQ_AI_CONFIG.bankMinQuality || 0.75;
+            var minDiff = WQ_AI_CONFIG.bankMinDiff || 7;
             var sub = _wqSubject || "其他";
             var kp = (_wqKps && _wqKps.length) ? _wqKps[0] : "综合运用";
             var recEls = document.querySelectorAll("#wqRecList .wq-rec-card");
@@ -9583,12 +9637,13 @@ var IndoorRouter = (function () {
                 return { text: text, diff: diff, kp: kps, answer: answer, solution: solution, idea: idea, pitfall: pitfall };
             }
 
-            /* ① 自动上传：扫描所有 AI 推荐题，权重达标则入库 */
+            /* ① 自动上传：扫描所有 AI 推荐题，质量+难度双达标才入库 */
             for (var i = 0; i < recEls.length; i++) {
                 var q = extractQFromCard(recEls[i]);
                 if (!q) continue;
+                if ((parseInt(q.diff) || 0) < minDiff) continue;   /* 难度不达标直接跳过 */
                 var ruleScore = calcQuestionQuality(q);
-                if (ruleScore >= 0.6) {
+                if (ruleScore >= minQ) {
                     q.source = "AI推荐自动入库(权重" + ruleScore.toFixed(2) + ")";
                     if (WQ_PIPELINE_B.storeQuestion(q, sub, kp)) autoStored++;
                 }
@@ -9608,9 +9663,10 @@ var IndoorRouter = (function () {
                         }
                     }
                     if (!targetQ) continue;
+                    if ((parseInt(targetQ.diff) || 0) < minDiff) continue;  /* 难度不达标跳过 */
                     var uRuleScore = calcQuestionQuality(targetQ);
                     var finalScore = uRuleScore * w.program + 1 * w.user;
-                    if (finalScore >= 0.6) {
+                    if (finalScore >= minQ) {
                         targetQ.diff = targetQ.diff || 5;
                         targetQ.kp = _wqKps;
                         if (WQ_PIPELINE_B.storeQuestion(targetQ, sub, kp)) userStored++;
@@ -9618,14 +9674,16 @@ var IndoorRouter = (function () {
                 }
             }
 
-            /* ③ 原题自动入库：质量达标则收入题库 */
+            /* ③ 原题自动入库：质量+难度双达标才收入题库 */
             var origText = (document.getElementById("wqText") || {}).value || "";
             if (origText.trim()) {
                 var origQ = { text: origText.trim(), diff: _wqDiff || 5, kp: _wqKps, answer: "", solution: "", source: "用户错题" };
-                var origScore = calcQuestionQuality(origQ);
-                if (origScore >= 0.6) {
-                    origQ.source = "用户错题(权重" + origScore.toFixed(2) + ")";
-                    if (WQ_PIPELINE_B.storeQuestion(origQ, sub, kp)) autoStored++;
+                if ((parseInt(origQ.diff) || 0) >= minDiff) {
+                    var origScore = calcQuestionQuality(origQ);
+                    if (origScore >= minQ) {
+                        origQ.source = "用户错题(权重" + origScore.toFixed(2) + ")";
+                        if (WQ_PIPELINE_B.storeQuestion(origQ, sub, kp)) autoStored++;
+                    }
                 }
             }
 
@@ -9890,8 +9948,8 @@ var IndoorRouter = (function () {
                 var cardId = "bankq_" + idx;
                 return '<div class="fb-item" style="padding:14px 14px 14px 18px;overflow:visible">' +
                     '<div style="position:relative">' +
-                    '<div style="cursor:pointer;display:block;width:100%" data-bankview="' + idx + '">' +
-                    '<div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-bottom:8px;padding-right:70px">' +
+                    '<div style="cursor:pointer;display:block;width:100%;padding-right:72px;box-sizing:border-box" data-bankview="' + idx + '">' +
+                    '<div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-bottom:8px">' +
                     '<span class="wq-item-subject" style="font-size:12px;padding:3px 10px">' + esc(q.subject) + '</span>' +
                     '<span class="wq-kp-tag small" style="font-size:12px">' + esc(q.kp) + '</span>' + diff +
                     '<span style="font-size:11px;color:#94a3b8">' + esc(q.source) + '</span>' +
@@ -9904,7 +9962,7 @@ var IndoorRouter = (function () {
                     (q.pitfall ? '<div style="font-size:13px;color:#dc2626;line-height:1.7;margin-top:6px;display:block"><b>⚠ 易错点：</b>' + renderMath(esc(q.pitfall)) + '</div>' : '') +
                     '</div>' +
                     '</div>' +
-                    (admin ? '<button class="wq-del" data-bankdel="' + encodeURIComponent(q.subject) + '||' + encodeURIComponent(q.kp) + '||' + encodeURIComponent(q.text) + '" style="position:absolute;top:0;right:0;padding:6px 10px;font-size:13px">🗑 删除</button>' : '') +
+                    (admin ? '<button class="wq-del" data-bankdel="' + encodeURIComponent(q.subject) + '||' + encodeURIComponent(q.kp) + '||' + encodeURIComponent(q.text) + '" style="position:absolute;top:0;right:0;padding:6px 10px;font-size:13px;z-index:10;cursor:pointer">🗑 删除</button>' : '') +
                     '</div></div>';
             }).join("");
             /* 事件委托：点击题干区域展开/收起详情，点击删除按钮删除（互不干扰）
@@ -10065,11 +10123,12 @@ var IndoorRouter = (function () {
          * 检验流程（面向所有用户）：
          *   ① 程序评分（题面完整度/难度合理/知识点/非雷同）
          *   ② AI 权威性评分（真实性/可答性/相关性/清晰度）+ 生成标准答案
-         *   ③ 综合评分 = 程序*0.5 + AI*0.5 >= 0.6 → 允许上传
+         *   ③ 综合评分 = 程序*0.5 + AI*0.5 >= bankMinQuality(0.75) → 允许上传
          *   ④ 上传到共享题库（POST /api/wq/bank），所有用户可见
          * ================================================================ */
         function verifyAndUploadGoodQuestion(item, btn) {
             if (!item || !item.text) { showToast("题目内容为空"); return; }
+            var minQ = WQ_AI_CONFIG.bankMinQuality || 0.75;
             if (btn) { btn.disabled = true; btn.textContent = "⏳ 检验中…"; }
             var targetQ = {
                 text: item.text, answer: "", solution: "", idea: "",
@@ -10087,7 +10146,7 @@ var IndoorRouter = (function () {
                     }
                     var aiScore = aiRes.total;
                     var finalScore = ruleScore * 0.5 + aiScore * 0.5;
-                    if (finalScore >= 0.6 && aiRes.answer) {
+                    if (finalScore >= minQ && aiRes.answer) {
                         targetQ.answer = aiRes.answer;
                         targetQ.solution = aiRes.solution || "";
                         targetQ.score = finalScore;
@@ -10104,12 +10163,12 @@ var IndoorRouter = (function () {
                         });
                     } else {
                         if (btn) { btn.disabled = false; btn.textContent = "⭐ 检验好题"; }
-                        showToast("检验未通过（综合" + finalScore.toFixed(2) + "），未达标阈值0.6。原因：" + (aiRes.reason || ""));
+                        showToast("检验未通过（综合" + finalScore.toFixed(2) + "），未达标阈值" + minQ + "。原因：" + (aiRes.reason || ""));
                     }
                 });
             } else {
                 /* 无 AI，仅用程序评分 */
-                if (ruleScore >= 0.6) {
+                if (ruleScore >= minQ) {
                     showToast("AI未启用，仅程序评分" + ruleScore.toFixed(2) + "，无法生成标准答案，暂不上传");
                 } else {
                     showToast("程序评分" + ruleScore.toFixed(2) + "未达标");
@@ -14660,10 +14719,11 @@ var currentIndoorBld = null;   // 当前进入楼内导航的楼栋（BUILDINGS 
             /* ---- 流水线 B：扩展题库 按钮 ---- */
             var wqExpand = document.getElementById("wqExpandBankBtn");
             if (wqExpand) wqExpand.addEventListener("click", function () { runWQPipelineB(); });
-            /* 初始化流水线 B：加载本地扩展题库 + 从 KV 同步共享题库 + 启动自动更新 */
+            /* 初始化流水线 B：加载本地扩展题库 + 精英化清理 + 从 KV 同步共享题库 + 启动自动更新 */
             try {
                 if (window.WQ_PIPELINE_B) {
                     WQ_PIPELINE_B.loadExtraBank();
+                    WQ_PIPELINE_B.purgeLowDiffQuestions();   /* 精英化：清理内置+扩展中的低难度题 */
                     WQ_PIPELINE_B.startAutoUpdate();
                     refreshWqBankStatus();
                     /* 从服务端 KV 同步共享题库（Worker 自主更新的题） */
@@ -17524,7 +17584,7 @@ body.fire-mode #fireOverlay{display:flex}
      统一管理员弹窗：固定密码验证（会话 3 小时有效）
      ---------------------------------------------------------------------
      ① 点「⚙ 管理员模式」弹出密码输入窗
-     ② 密码为预设常量 MASTER_KEY（部署时修改），所有用户统一使用
+     ② 密码以 SHA-256 哈希形式存储（MASTER_KEY_HASH），所有用户统一使用
      ③ 登录成功后写入 sessionStorage 会话，3 小时内免密
      ④ 超时或点「退出登录」后需重新输入密码
      ===================================================================== -->
@@ -17620,12 +17680,28 @@ body.fire-mode #fireOverlay{display:flex}
 </div>
 
 <script id="admin-login-modal-script">
-/* admin-login:modal —— 固定管理员密码验证，会话 3 小时有效 */
+/* admin-login:modal —— 管理员密码验证（SHA-256 哈希比对，不存明文），会话 3 小时有效 */
 (function () {
     'use strict';
 
-    /* ★★★ 管理员密码（部署后请修改此常量） ★★★ */
-    var MASTER_KEY = '888888';
+    /* ★★★ 管理员密码的 SHA-256 哈希（部署后修改密码时更新此哈希） ★★★ */
+    var MASTER_KEY_HASH = '92925488b28ab12584ac8fcaa8a27a0f497b2c62940c8f4fbc8ef19ebc87c43e';
+
+    /* 本地 SHA-256（WebCrypto），返回小写 hex 字符串；不可用时返回 null */
+    function sha256Hex(raw) {
+        var text = String(raw == null ? '' : raw);
+        var subtle = (typeof crypto !== 'undefined' && crypto.subtle) || null;
+        if (!subtle) return Promise.resolve(null);
+        var buf;
+        try {
+            buf = new TextEncoder().encode(text);
+        } catch (e) { return Promise.resolve(null); }
+        return subtle.digest('SHA-256', buf).then(function (digest) {
+            var bytes = new Uint8Array(digest), hex = '';
+            for (var i = 0; i < bytes.length; i++) hex += ('0' + bytes[i].toString(16)).slice(-2);
+            return hex;
+        });
+    }
 
     var SESS_KEY = 'floorLockAdminSess';      // 会话标记（模块据此跳过自己的密码门）
     var JUST_KEY = 'fireAdminJustVerified';   // 一次性放行标记（给页头脚本看）
@@ -17743,19 +17819,29 @@ body.fire-mode #fireOverlay{display:flex}
         }
     }
 
-    /* ---------- 提交：直接校验固定管理员密码 ---------- */
+    /* ---------- 提交：SHA-256 哈希比对固定管理员密码 ---------- */
     function submit() {
         if (okBtn.disabled) return;
         var p1 = String(input1.value || '');
         if (!p1) { fail('请输入管理员密码。'); return; }
-        if (p1 === MASTER_KEY) {
-            close();
-            goAdmin();
-        } else {
-            fail('密码不正确，请重试。');
-            input1.value = '';
-            try { input1.focus(); } catch (e) {}
-        }
+        okBtn.disabled = true;
+        okBtn.textContent = '验证中…';
+        sha256Hex(p1).then(function (hash) {
+            okBtn.disabled = false;
+            okBtn.textContent = '进入';
+            if (hash && hash === MASTER_KEY_HASH) {
+                close();
+                goAdmin();
+            } else {
+                fail('密码不正确，请重试。');
+                input1.value = '';
+                try { input1.focus(); } catch (e) {}
+            }
+        }).catch(function () {
+            okBtn.disabled = false;
+            okBtn.textContent = '进入';
+            fail('当前环境不支持密码校验，请使用现代浏览器。');
+        });
     }
 
     /* ---------- 检查会话是否在 3 小时有效期内 ---------- */
