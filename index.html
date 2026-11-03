@@ -10,9 +10,9 @@
     <!-- KaTeX 数学公式渲染 -->
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
     <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
-<!-- 管理员密码门：每次进入 ?admin=1 都强制重新验证（不清除同页内已验证状态） -->
+<!-- 管理员密码门：会话 3 小时有效，超时需重新输入密码 -->
 <script id="admin-reauth-onload">
-/* fire-mode:reauth —— 每次进 ?admin=1 都要验证；未设密码时必须先走"出厂令牌"弹窗 */
+/* fire-mode:reauth —— 管理员会话 3 小时有效；未登录或超时才弹窗验证密码 */
 (function () {
     try {
         var isAdmin = /[?&]admin=1(&|$)/.test(window.location.search || '');
@@ -20,39 +20,32 @@
         var ss = window.sessionStorage;
         if (!ss) return;
 
-        // 登录/令牌弹窗刚验证通过：放行这一次，并补上会话标记，避免模块再问一遍
+        var SESS_MAX_AGE = 3 * 60 * 60 * 1000; /* 3 小时 */
+
+        // 登录弹窗刚验证通过：放行这一次，并补上会话标记+时间戳
         var just = 0;
         try { just = parseInt(ss.getItem('fireAdminJustVerified') || '0', 10) || 0; } catch (e) {}
         var fresh = just && (Date.now() - just) < 15000;
-        // 无 WebCrypto 的降级环境：弹窗无法本地哈希，回退到模块自带密码门完成设置
-        var legacy = false;
-        try { legacy = ss.getItem('fireAdminLegacySetup') === '1'; ss.removeItem('fireAdminLegacySetup'); } catch (e) {}
-
-        // 还没设置过管理员密码：只有"弹窗里验过出厂令牌"的这一次才允许进入，
-        // 手输 ?admin=1 一律退回普通页，避免绕过令牌直接设置密码。
-        var hasPass = false;
-        try { hasPass = !!window.localStorage.getItem('floorLockAdminPass'); } catch (e) {}
-        if (!hasPass && !fresh && !legacy) {
-            try {
-                var url = new URL(window.location.href);
-                url.searchParams.delete('admin');
-                window.location.replace(url.toString());
-            } catch (e2) { window.location.href = window.location.pathname; }
-            return;
-        }
 
         if (fresh) {
             try { ss.removeItem('fireAdminJustVerified'); } catch (e) {}
             try { ss.setItem('floorLockAdminSess', 'ok'); } catch (e) {}
+            try { ss.setItem('floorLockAdminSessAt', String(Date.now())); } catch (e) {}
             return;
         }
 
-        // 常规进入：清掉旧会话标记，强制管理员密码门重新验证
-        ss.removeItem('floorLockAdminSess');
-        for (var i = ss.length - 1; i >= 0; i--) {
-            var k = ss.key(i);
-            if (k && /^floorLockAdmin/i.test(k)) ss.removeItem(k);
+        // 检查现有会话是否在 3 小时有效期内 → 有效则免密放行
+        var sessOk = false, sessAt = 0;
+        try { sessOk = ss.getItem('floorLockAdminSess') === 'ok'; } catch (e) {}
+        try { sessAt = parseInt(ss.getItem('floorLockAdminSessAt') || '0', 10) || 0; } catch (e) {}
+        if (sessOk && sessAt && (Date.now() - sessAt) < SESS_MAX_AGE) {
+            return; /* 会话有效，免密进入 */
         }
+
+        // 会话过期或不存在：清除，强制管理员密码门重新验证
+        ss.removeItem('floorLockAdminSess');
+        ss.removeItem('floorLockAdminSessAt');
+        ss.removeItem('wq_bank_admin');
     } catch (e) { /* 隐私模式下忽略 */ }
 })();
 </script>
@@ -1461,6 +1454,9 @@ body.no-motion .layer-base.plan-loading::after { animation: none; }
     background: linear-gradient(180deg, #818cf8, #c4b5fd);
 }
 .fb-item:hover { transform: translateY(-2px); box-shadow: 0 8px 24px rgba(99,102,241,.12); border-color: #c7d2fe; }
+/* 题库列表移动端优化：移除 300ms 点击延迟，防止文字误选 */
+#wqBankItems .fb-item { touch-action: manipulation; -webkit-tap-highlight-color: rgba(99,102,241,.08); }
+#wqBankItems [data-bankview] { -webkit-user-select: none; user-select: none; }
 .fb-item-head { display: flex; justify-content: space-between; margin-bottom: 4px; }
 .fb-item-type { font-weight: 600; color: #1d4ed8; }
 .fb-item-time { color: #94a3b8; font-size: 12px; }
@@ -2086,16 +2082,33 @@ window.__FLOOR_IMAGES["5F"] = "data:image/svg+xml;base64,77u/PHN2ZyB3aWR0aD0iNTA
   }
 
   function adminSessionOk() {
-    try { return window.sessionStorage.getItem(ADMIN_SESS) === 'ok'; } catch (err) { return false; }
+    try {
+      if (window.sessionStorage.getItem(ADMIN_SESS) !== 'ok') return false;
+      var at = parseInt(window.sessionStorage.getItem(ADMIN_SESS + 'At') || '0', 10) || 0;
+      if (!at) return false;
+      /* 会话有效期 3 小时 */
+      if (Date.now() - at > 3 * 60 * 60 * 1000) {
+        window.sessionStorage.removeItem(ADMIN_SESS);
+        window.sessionStorage.removeItem(ADMIN_SESS + 'At');
+        return false;
+      }
+      return true;
+    } catch (err) { return false; }
   }
 
   function markAdminSession() {
-    try { window.sessionStorage.setItem(ADMIN_SESS, 'ok'); } catch (err) { /* 忽略 */ }
+    try {
+      window.sessionStorage.setItem(ADMIN_SESS, 'ok');
+      window.sessionStorage.setItem(ADMIN_SESS + 'At', String(Date.now()));
+    } catch (err) { /* 忽略 */ }
   }
 
   /** 清除管理员会话（下次 ?admin=1 需重新验证密码） */
   function clearAdminSession() {
-    try { window.sessionStorage.removeItem(ADMIN_SESS); } catch (err) { /* 忽略 */ }
+    try {
+      window.sessionStorage.removeItem(ADMIN_SESS);
+      window.sessionStorage.removeItem(ADMIN_SESS + 'At');
+    } catch (err) { /* 忽略 */ }
   }
 
   /* ========================================================================
@@ -2604,50 +2617,25 @@ window.__FLOOR_IMAGES["5F"] = "data:image/svg+xml;base64,77u/PHN2ZyB3aWR0aD0iNTA
     function renderAdminGate() {
       clearElement(root);
       var gate = h('div', { className: 'fl-gate' });
-      gate.appendChild(h('p', { className: 'fl-title', text: '管理员模式' }));
-      gate.appendChild(h('p', { className: 'fl-note', text: '此页面可修改楼层加密配置，需要验证管理员密码。' }));
+      gate.appendChild(h('p', { className: 'fl-title', text: '管理员验证' }));
+      gate.appendChild(h('p', { className: 'fl-note', text: '请输入管理员密码以访问配置面板。会话 3 小时有效。' }));
 
-      var existing = readAdminHash();
-      var firstTime = !existing;
       var msg = h('p', { className: 'fl-dialog-msg', attrs: { role: 'alert' } });
-
-      function mkInput(placeholder) {
-        return h('input', {
-          className: 'fl-gate-input',
-          attrs: { type: 'password', autocomplete: 'new-password', placeholder: placeholder }
-        });
-      }
-
-      var done = function () { adminState.gateTries = 0; markAdminSession(); renderAdmin(); };
-
-      if (firstTime) {
-        // 首次进入：强制设置管理员密码（两次一致，≥4 位）
-        gate.appendChild(h('p', { className: 'fl-note fl-gate-hint', text: '首次使用：请先设置管理员密码（至少 4 位）。' }));
-        var i1 = mkInput('设置管理员密码');
-        var i2 = mkInput('再次输入确认');
-        gate.appendChild(i1); gate.appendChild(i2);
-        var okBtn = h('button', { className: 'fl-btn fl-btn-primary', text: '保存并进入', attrs: { type: 'button' } });
-        okBtn.addEventListener('click', function () {
-          var a = i1.value, b = i2.value;
-          if (a.length < 4) { msg.textContent = '密码至少 4 位。'; i1.focus(); return; }
-          if (a !== b) { msg.textContent = '两次输入不一致，请重试。'; i2.select(); return; }
-          okBtn.disabled = true;
-          hashAsync(a).then(function (digest) {
-            if (writeAdminHash(digest)) {
-              done();
-            } else {
-              okBtn.disabled = false;
-              msg.textContent = '保存失败（浏览器存储不可用）。';
-            }
-          });
-        });
-        gate.appendChild(h('div', { className: 'fl-actions', children: [okBtn] }));
-      } else {
-        // 已设置：验证密码（最多 5 次）
-        var pin = mkInput('输入管理员密码');
-        gate.appendChild(pin);
-        var goBtn = h('button', { className: 'fl-btn fl-btn-primary', text: '进入管理面板', attrs: { type: 'button' } });
-        function deny() {
+      var pin = h('input', {
+        className: 'fl-gate-input',
+        attrs: { type: 'password', autocomplete: 'new-password', placeholder: '管理员密码' }
+      });
+      gate.appendChild(pin);
+      var goBtn = h('button', { className: 'fl-btn fl-btn-primary', text: '进入管理面板', attrs: { type: 'button' } });
+      function submitPin() {
+        var v = pin.value;
+        if (!v) { msg.textContent = '请输入管理员密码。'; pin.focus(); return; }
+        /* 统一使用固定管理员密码（与主登录弹窗 MASTER_KEY 一致） */
+        if (v === '888888') {
+          adminState.gateTries = 0;
+          markAdminSession();
+          renderAdmin();
+        } else {
           adminState.gateTries++;
           if (adminState.gateTries >= 5) {
             goBtn.disabled = true; pin.disabled = true;
@@ -2657,26 +2645,16 @@ window.__FLOOR_IMAGES["5F"] = "data:image/svg+xml;base64,77u/PHN2ZyB3aWR0aD0iNTA
           msg.textContent = '密码错误，还可尝试 ' + (5 - adminState.gateTries) + ' 次。';
           pin.value = ''; pin.focus();
         }
-        function submitPin() {
-          var v = pin.value;
-          if (!v) { msg.textContent = '请输入管理员密码。'; pin.focus(); return; }
-          goBtn.disabled = true;
-          hashAsync(v).then(function (digest) {
-            if (digest === existing) { done(); }
-            else { goBtn.disabled = false; deny(); }
-          });
-        }
-        goBtn.addEventListener('click', submitPin);
-        pin.addEventListener('keydown', function (e) {
-          if (e.key === 'Enter') { e.preventDefault(); submitPin(); }
-        });
-        gate.appendChild(h('div', { className: 'fl-actions', children: [goBtn] }));
       }
-
+      goBtn.addEventListener('click', submitPin);
+      pin.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter') { e.preventDefault(); submitPin(); }
+      });
+      gate.appendChild(h('div', { className: 'fl-actions', children: [goBtn] }));
       gate.appendChild(msg);
       gate.appendChild(h('p', {
         className: 'fl-note',
-        text: '管理员密码独立于各楼层密码，仅保存在本机浏览器中；忘记密码可清除浏览器的 localStorage（键 ' + ADMIN_KEY + '）重置。'
+        text: '管理员密码为系统预设，所有用户统一使用；会话超时后需重新验证。'
       }));
       root.appendChild(gate);
     }
@@ -9852,9 +9830,14 @@ var IndoorRouter = (function () {
         var WQ_BANK_ADMIN_PWD = "hnu2024admin"; /* 管理员密码（简单校验，仅用于本地删减题库） */
         function isBankAdmin() {
             /* 统一使用主管理员模式会话（sessionStorage.floorLockAdminSess），
-             * 不再在题库内单独登录。兼容旧的 localStorage.wq_bank_admin 标记。 */
+             * 会话 3 小时有效，超时自动失效。兼容旧的 localStorage.wq_bank_admin 标记。 */
             try {
-                if (window.sessionStorage && sessionStorage.getItem("floorLockAdminSess") === "ok") return true;
+                if (window.sessionStorage && sessionStorage.getItem("floorLockAdminSess") === "ok") {
+                    var at = parseInt(sessionStorage.getItem("floorLockAdminSessAt") || "0", 10) || 0;
+                    if (at && (Date.now() - at) < 3 * 60 * 60 * 1000) return true;
+                    sessionStorage.removeItem("floorLockAdminSess");
+                    sessionStorage.removeItem("floorLockAdminSessAt");
+                }
             } catch (e) {}
             return localStorage.getItem("wq_bank_admin") === "1";
         }
@@ -9909,7 +9892,7 @@ var IndoorRouter = (function () {
                     '<span class="wq-item-subject" style="font-size:12px;padding:3px 10px">' + esc(q.subject) + '</span>' +
                     '<span class="wq-kp-tag small" style="font-size:12px">' + esc(q.kp) + '</span>' + diff +
                     '<span style="font-size:11px;color:#94a3b8">' + esc(q.source) + '</span>' +
-                    '<span style="font-size:11px;color:#8b5cf6;margin-left:auto">▼ 点击查看详情</span></div>' +
+                    '<span class="bank-view-hint" style="font-size:11px;color:#8b5cf6;margin-left:auto">▼ 点击查看详情</span></div>' +
                     '<div style="font-size:16px;color:#1e293b;line-height:1.7;font-weight:500;word-break:break-word">' + esc(q.text) + '</div>' +
                     '<div id="' + cardId + '_detail" style="display:none;margin-top:10px;padding-top:10px;border-top:1px dashed #e2e8f0">' +
                     (q.answer ? '<div style="font-size:14px;color:#166534;margin-bottom:8px"><b style="color:#065f46">✅ 答案：</b>' + renderMath(esc(q.answer)) + '</div>' : '') +
@@ -9921,9 +9904,15 @@ var IndoorRouter = (function () {
                     (admin ? '<button class="wq-del" data-bankdel="' + encodeURIComponent(q.subject) + '||' + encodeURIComponent(q.kp) + '||' + encodeURIComponent(q.text) + '" style="flex-shrink:0;padding:6px 10px;font-size:13px">🗑 删除</button>' : '') +
                     '</div></div>';
             }).join("");
-            /* 事件委托：点击题干区域展开/收起详情，点击删除按钮删除（互不干扰） */
-            box.onclick = function (e) {
-                var delBtn = e.target.closest("[data-bankdel]");
+            /* 事件委托：点击题干区域展开/收起详情，点击删除按钮删除（互不干扰）
+             * 同时绑定 click 和 touchend，兼容移动端触摸；用时间戳防重复触发 */
+            var lastTap = 0;
+            function handleBankTap(e) {
+                var now = Date.now();
+                if (now - lastTap < 300) return;  /* 防抖：避免 click+touchend 双触发 */
+                lastTap = now;
+                var target = e.target;
+                var delBtn = target.closest ? target.closest("[data-bankdel]") : null;
                 if (delBtn) {
                     if (!admin) return;
                     var parts = delBtn.getAttribute("data-bankdel").split("||");
@@ -9935,15 +9924,27 @@ var IndoorRouter = (function () {
                     }
                     return;
                 }
-                var view = e.target.closest("[data-bankview]");
+                var view = target.closest ? target.closest("[data-bankview]") : null;
                 if (view) {
                     var idx = view.getAttribute("data-bankview");
                     var det = document.getElementById("bankq_" + idx + "_detail");
                     if (det) {
-                        det.style.display = det.style.display === "none" ? "block" : "none";
+                        var willShow = det.style.display === "none" || det.style.display === "";
+                        det.style.display = willShow ? "block" : "none";
+                        var hint = view.querySelector(".bank-view-hint");
+                        if (hint) hint.textContent = willShow ? "▲ 收起详情" : "▼ 点击查看详情";
                     }
                 }
-            };
+            }
+            box.onclick = handleBankTap;
+            box.addEventListener("touchend", function (e) {
+                /* touchend 时取 changedTouches 的 target */
+                var t = e.changedTouches && e.changedTouches[0];
+                if (t) {
+                    var el = document.elementFromPoint(t.clientX, t.clientY);
+                    if (el) handleBankTap({ target: el });
+                }
+            }, { passive: true });
         }
 
         /* ================================================================
@@ -14291,7 +14292,8 @@ var currentIndoorBld = null;   // 当前进入楼内导航的楼栋（BUILDINGS 
                 if (admin) {
                     var b = document.createElement("a");
                     b.href = resolveNormalUrl();
-                    b.textContent = "← 返回普通模式";
+                    b.textContent = "← 返回";
+                    b.title = "返回普通模式（不退出登录）";
                     back.appendChild(b);
                     /* 退出管理员登录：清除会话，返回普通模式 */
                     var lo = document.createElement("a");
@@ -14299,8 +14301,10 @@ var currentIndoorBld = null;   // 当前进入楼内导航的楼栋（BUILDINGS 
                     lo.textContent = "🚪 退出登录";
                     lo.style.marginLeft = "14px";
                     lo.style.color = "#dc2626";
+                    lo.title = "退出管理员登录，下次需重新输入密码";
                     lo.addEventListener("click", function () {
                         try { sessionStorage.removeItem("floorLockAdminSess"); } catch (e) {}
+                        try { sessionStorage.removeItem("floorLockAdminSessAt"); } catch (e) {}
                         try { localStorage.removeItem("wq_bank_admin"); } catch (e) {}
                         window.location.href = resolveNormalUrl();
                     });
@@ -14484,6 +14488,21 @@ var currentIndoorBld = null;   // 当前进入楼内导航的楼栋（BUILDINGS 
         }
         function boot() {
             applyModeChrome();                  // 先把模式相关的显示/隐藏处理好
+            /* 管理员会话超时检查：每 60 秒检查一次，超过 3 小时自动退出到普通模式 */
+            if (isAdminMode()) {
+                setInterval(function () {
+                    try {
+                        var ok = sessionStorage.getItem("floorLockAdminSess") === "ok";
+                        var at = parseInt(sessionStorage.getItem("floorLockAdminSessAt") || "0", 10) || 0;
+                        if (!ok || !at || (Date.now() - at) > 3 * 60 * 60 * 1000) {
+                            sessionStorage.removeItem("floorLockAdminSess");
+                            sessionStorage.removeItem("floorLockAdminSessAt");
+                            sessionStorage.removeItem("wq_bank_admin");
+                            window.location.href = resolveNormalUrl();
+                        }
+                    } catch (e) {}
+                }, 60000);
+            }
             Track.log("funnel", { stage: "campus" });   // S5.3 漏斗：进入校园视图
             initOfflineWatch();                 // S5.1 断网检测与恢复自动重试
             selfTest();                         // S5.5 配置自检（新增楼栋只改数据的完整性校验）
@@ -17511,14 +17530,12 @@ body.fire-mode #fireOverlay{display:flex}
 
 
 <!-- =====================================================================
-     统一管理员弹窗：出厂令牌 → 设置密码 → 登录 / 强制重置（单弹窗多模式）
+     统一管理员弹窗：固定密码验证（会话 3 小时有效）
      ---------------------------------------------------------------------
-     ① 点「⚙ 管理员模式」一律先弹本窗（每次进入都要重新验证，无会话免密）
-     ② 未设管理员密码 → 先输「出厂安全令牌」才有资格设置管理员密码（门槛）
-     ③ 已设密码 → 直接输管理员密码进入；连续输错令牌 3 次本次会话锁定
-     ④ 管理员面板底部「🔑 强制重置管理员密码」→ 需再输一次令牌
-     存储格式与 floor-lock 模块一致：
-       localStorage["floorLockAdminPass"] = {"hash":"sha256:<hex>","at":时间戳}
+     ① 点「⚙ 管理员模式」弹出密码输入窗
+     ② 密码为预设常量 MASTER_KEY（部署时修改），所有用户统一使用
+     ③ 登录成功后写入 sessionStorage 会话，3 小时内免密
+     ④ 超时或点「退出登录」后需重新输入密码
      ===================================================================== -->
 <style id="admin-login-modal-styles">
     #adminLoginOverlay {
@@ -17612,61 +17629,26 @@ body.fire-mode #fireOverlay{display:flex}
 </div>
 
 <script id="admin-login-modal-script">
-/* admin-login:modal —— 出厂令牌 → 设置密码 → 登录 / 重置（每次进入都重新验证） */
+/* admin-login:modal —— 固定管理员密码验证，会话 3 小时有效 */
 (function () {
     'use strict';
 
-    /* ★★★ 出厂安全令牌（管理员资格门槛，部署后请修改此常量） ★★★ */
+    /* ★★★ 管理员密码（部署后请修改此常量） ★★★ */
     var MASTER_KEY = '888888';
-    var MAX_TOKEN_TRIES = 3;                  // 连续输错令牌次数上限（本次会话内）
 
-    var PASS_KEY = 'floorLockAdminPass';      // 管理员密码（与 floor-lock 模块同结构）
     var SESS_KEY = 'floorLockAdminSess';      // 会话标记（模块据此跳过自己的密码门）
-    var JUST_KEY = 'fireAdminJustVerified';   // 一次性放行标记（给页头"强制重验"脚本看）
-    var LEGACY_KEY = 'fireAdminLegacySetup';  // 无 WebCrypto 时回退模块密码门的标记
+    var JUST_KEY = 'fireAdminJustVerified';   // 一次性放行标记（给页头脚本看）
 
     var overlay = null, card = null, input1 = null, input2 = null, errEl = null,
         subEl = null, titleEl = null, okBtn = null, cancelBtn = null,
         stepsEl = null, forgotEl = null;
-    var mode = 'login';      // token | setup | login | reset
-    var tokenTries = 0;      // 本次会话内令牌错误次数
-    var locked = false;      // 错误次数用尽后锁定
+    var mode = 'login';
 
     function isAdminMode() {
         try { return new URLSearchParams(window.location.search).get('admin') === '1'; }
         catch (e) { return /[?&]admin=1(&|$)/.test(window.location.search || ''); }
     }
 
-    /* ---------- 存储（严格对齐模块的 JSON 结构） ---------- */
-    function readHash() {
-        var raw = '';
-        try { raw = window.localStorage.getItem(PASS_KEY) || ''; } catch (e) { return ''; }
-        if (!raw) return '';
-        try {
-            var p = JSON.parse(raw);
-            if (p && typeof p.hash === 'string') return p.hash;
-        } catch (e) { /* 兼容旧的裸字符串 */ }
-        return raw;
-    }
-    function hasPassword() { return !!readHash(); }
-    function writeHash(hex) {
-        try {
-            window.localStorage.setItem(PASS_KEY, JSON.stringify({ hash: 'sha256:' + hex, at: Date.now() }));
-            return true;
-        } catch (e) { return false; }
-    }
-    function clearHash() {
-        try { window.localStorage.removeItem(PASS_KEY); return true; } catch (e) { return false; }
-    }
-    function sha256Hex(text) {
-        if (!window.crypto || !window.crypto.subtle || !window.TextEncoder) return null;
-        return window.crypto.subtle.digest('SHA-256', new TextEncoder().encode(text))
-            .then(function (buf) {
-                var b = new Uint8Array(buf), hex = '';
-                for (var i = 0; i < b.length; i++) hex += ('0' + b[i].toString(16)).slice(-2);
-                return hex;
-            });
-    }
 
     /* ---------- DOM ---------- */
     function build() {
@@ -17694,30 +17676,14 @@ body.fire-mode #fireOverlay{display:flex}
         document.addEventListener('keydown', function (e) {
             if (e.key === 'Escape' && overlay.classList.contains('show')) close();
         });
-        forgotEl.addEventListener('click', function () { setMode('reset'); });
         return true;
     }
 
     var MODES = {
-        token: {
-            title: '出厂安全令牌',
-            sub: '首次使用：请输入出厂安全令牌，验证通过后才有资格设置管理员密码。',
-            ok: '验证令牌', ph1: '出厂安全令牌', steps: 1
-        },
-        setup: {
-            title: '设置管理员密码',
-            sub: '令牌验证通过。请设置管理员密码（至少 4 位），保存后直接进入管理员界面。',
-            ok: '保存并进入', ph1: '管理员密码', hasSecond: true, steps: 2
-        },
         login: {
             title: '管理员验证',
-            sub: '为保障安全，每次进入都需重新输入管理员密码。',
-            ok: '进入', ph1: '管理员密码', steps: 0, showForgot: true
-        },
-        reset: {
-            title: '强制重置管理员密码',
-            sub: '此操作会清空现有管理员密码。请输入出厂安全令牌确认。',
-            ok: '重置', ph1: '出厂安全令牌', steps: 0
+            sub: '请输入管理员密码。会话 3 小时有效，超时需重新验证。',
+            ok: '进入', ph1: '管理员密码', steps: 0, showForgot: false
         }
     };
 
@@ -17736,8 +17702,8 @@ body.fire-mode #fireOverlay{display:flex}
         subEl.textContent = cfg.sub;
         input1.value = '';
         input1.setAttribute('placeholder', cfg.ph1 || '密码');
-        input1.type = (next === 'login' || next === 'setup') ? 'password' : 'text';
-        input2.hidden = !cfg.hasSecond;
+        input1.type = 'password';
+        input2.hidden = true;
         input2.value = '';
         okBtn.textContent = cfg.ok;
         okBtn.disabled = false;
@@ -17748,12 +17714,7 @@ body.fire-mode #fireOverlay{display:flex}
 
     function open(kind) {
         if (!overlay && !build()) return;
-        if (kind === 'reset') setMode('reset');
-        else setMode(hasPassword() ? 'login' : 'token');
-        if (locked) {
-            errEl.textContent = '安全令牌错误次数过多，已拒绝访问。请刷新页面后重试。';
-            okBtn.disabled = true;
-        }
+        setMode('login');
         overlay.classList.add('show');
         overlay.setAttribute('aria-hidden', 'false');
         setTimeout(function () { try { input1.focus(); } catch (e) {} }, 30);
@@ -17770,6 +17731,7 @@ body.fire-mode #fireOverlay{display:flex}
     function goAdmin() {
         try {
             window.sessionStorage.setItem(SESS_KEY, 'ok');
+            window.sessionStorage.setItem(SESS_KEY + 'At', String(Date.now()));
             window.sessionStorage.setItem(JUST_KEY, String(Date.now()));
         } catch (e) {}
         window.location.href = '?admin=1';
@@ -17789,98 +17751,32 @@ body.fire-mode #fireOverlay{display:flex}
             card.classList.add('alm-shake');
         }
     }
-    function tokenFail() {
-        tokenTries++;
-        if (tokenTries >= MAX_TOKEN_TRIES) {
-            locked = true;
-            errEl.textContent = '安全令牌连续输错 ' + MAX_TOKEN_TRIES + ' 次，已拒绝访问。请刷新页面后重试。';
-            okBtn.disabled = true;
-            input1.value = '';
-            return;
-        }
-        fail('安全令牌不正确，还可尝试 ' + (MAX_TOKEN_TRIES - tokenTries) + ' 次。');
-        input1.value = '';
-    }
 
-    /* ---------- 提交 ---------- */
+    /* ---------- 提交：直接校验固定管理员密码 ---------- */
     function submit() {
         if (okBtn.disabled) return;
         var p1 = String(input1.value || '');
-        var p2 = String(input2.value || '');
-
-        if (mode === 'token') {
-            if (!p1) { fail('请输入出厂安全令牌。'); return; }
-            if (p1 === MASTER_KEY) {
-                tokenTries = 0;
-                setMode('setup');
-                try { input1.focus(); } catch (e) {}
-                return;
-            }
-            tokenFail();
-            return;
-        }
-
-        if (mode === 'reset') {
-            if (!p1) { fail('请输入出厂安全令牌。'); return; }
-            if (p1 !== MASTER_KEY) { tokenFail(); return; }
-            tokenTries = 0;
-            clearHash();
-            try { window.sessionStorage.removeItem(SESS_KEY); } catch (e) {}
-            try { window.sessionStorage.removeItem(JUST_KEY); } catch (e) {}
+        if (!p1) { fail('请输入管理员密码。'); return; }
+        if (p1 === MASTER_KEY) {
             close();
-            goNormal();          // 回到普通页面，系统处于"未设置密码"的初始状态
-            return;
+            goAdmin();
+        } else {
+            fail('密码不正确，请重试。');
+            input1.value = '';
+            try { input1.focus(); } catch (e) {}
         }
-
-        if (mode === 'setup') {
-            if (p1.length < 4) { fail('密码至少 4 位。'); return; }
-            if (p1 !== p2) { fail('两次输入的密码不一致。'); input2.value = ''; return; }
-            okBtn.disabled = true;
-            okBtn.textContent = '保存中…';
-            var sp = sha256Hex(p1);
-            if (!sp) {   // 没有 WebCrypto：回退模块自己的设置卡片（走降级标记）
-                try { window.sessionStorage.setItem(LEGACY_KEY, '1'); } catch (e) {}
-                try { window.sessionStorage.removeItem(SESS_KEY); } catch (e) {}
-                try { window.sessionStorage.removeItem(JUST_KEY); } catch (e) {}
-                window.location.href = '?admin=1';
-                return;
-            }
-            sp.then(function (hex) {
-                okBtn.disabled = false;
-                okBtn.textContent = '保存并进入';
-                if (!writeHash(hex)) { fail('保存失败（浏览器可能禁用了本地存储）。'); return; }
-                close();
-                goAdmin();
-            });
-            return;
-        }
-
-        /* 登录 */
-        if (!p1) { fail('请输入密码。'); return; }
-        var stored = readHash();
-        if (!stored) { setMode('token'); return; }   // 密码被清掉了 → 回到令牌流程
-        if (stored.indexOf('plain:') === 0) {
-            if (p1 === stored.slice(6)) { close(); goAdmin(); } else fail('密码不正确，请重试。');
-            return;
-        }
-        if (stored.indexOf('sha256:') !== 0) {
-            if (p1 === stored) { close(); goAdmin(); } else fail('密码不正确，请重试。');
-            return;
-        }
-        var expect = stored.slice(7).toLowerCase();
-        var dg = sha256Hex(p1);
-        if (!dg) { fail('当前环境不支持本地加密校验，请用 http 方式打开。'); return; }
-        okBtn.disabled = true;
-        okBtn.textContent = '验证中…';
-        dg.then(function (hex) {
-            okBtn.disabled = false;
-            okBtn.textContent = '进入';
-            if (hex === expect) { close(); goAdmin(); }
-            else { fail('密码不正确，请重试。'); input1.value = ''; try { input1.focus(); } catch (e) {} }
-        });
     }
 
-    /* ---------- 入口拦截：所有指向 ?admin=1 的链接一律先过弹窗 ---------- */
+    /* ---------- 检查会话是否在 3 小时有效期内 ---------- */
+    function sessionValid() {
+        try {
+            if (window.sessionStorage.getItem(SESS_KEY) !== 'ok') return false;
+            var at = parseInt(window.sessionStorage.getItem(SESS_KEY + 'At') || '0', 10) || 0;
+            return at && (Date.now() - at) < 3 * 60 * 60 * 1000;
+        } catch (e) { return false; }
+    }
+
+    /* ---------- 入口拦截：指向 ?admin=1 的链接，已有效会话则直接进入 ---------- */
     document.addEventListener('click', function (e) {
         if (isAdminMode()) return;
         var a = e.target;
@@ -17889,40 +17785,18 @@ body.fire-mode #fireOverlay{display:flex}
         var href = a.getAttribute('href') || '';
         if (href.indexOf('admin=1') === -1) return;
         e.preventDefault();
-        open();
-    }, true);
-
-    /* ---------- 管理员面板里的「强制重置」按钮 ---------- */
-    function ensureResetBtn() {
-        var bar = document.getElementById('lock-bar');
-        if (!bar) return;
-        var rootEl = bar.querySelector('.fl-root');
-        if (!rootEl) return;
-        if (rootEl.querySelector('.fl-gate')) return;          // 还没登录，不显示
-        if (!rootEl.querySelector('.fl-admin-list')) return;   // 没有配置面板
-        var btn = document.getElementById('adminResetBtn');
-        if (!btn) {
-            btn = document.createElement('button');
-            btn.id = 'adminResetBtn';
-            btn.type = 'button';
-            btn.textContent = '🔑 强制重置管理员密码';
-            btn.title = '需要输入出厂安全令牌 (MASTER_KEY)';
-            btn.addEventListener('click', function () { open('reset'); });
+        if (sessionValid()) {
+            /* 会话有效，直接进入管理员模式 */
+            window.location.href = '?admin=1';
+        } else {
+            open();
         }
-        if (btn.parentNode !== rootEl) rootEl.appendChild(btn);
-    }
-    if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', function () { setInterval(ensureResetBtn, 1000); });
-    } else {
-        setInterval(ensureResetBtn, 1000);
-    }
+    }, true);
 
     window.AdminLogin = {
         open: open,
         close: close,
-        mode: function () { return mode; },
-        hasPassword: hasPassword,
-        locked: function () { return locked; }   // 调试/测试用
+        mode: function () { return mode; }
     };
 })();
 </script>
