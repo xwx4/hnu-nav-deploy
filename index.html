@@ -7273,15 +7273,21 @@ var IndoorRouter = (function () {
                     reasoning_effort: "none"
                 };
                 var timedOut = false;
+                var cbDone = false;
                 var timer = setTimeout(function () {
                     timedOut = true;
                     tryCfFallback();
                 }, WQ_AI_CONFIG.timeout);
 
-                function tryCfFallback() {
-                    if (timedOut) return;
-                    timedOut = true;  /* 防止重复回调 */
+                function done(err, res) {
+                    if (cbDone) return;
+                    cbDone = true;
                     clearTimeout(timer);
+                    cb(err, res);
+                }
+
+                function tryCfFallback() {
+                    if (cbDone) return;  /* 已有结果则不再降级 */
                     /* 降级到 Cloudflare Workers AI（内网，无跨境超时） */
                     fetch("/api/chat-cf", {
                         method: "POST",
@@ -7292,10 +7298,10 @@ var IndoorRouter = (function () {
                         return r.json();
                     }).then(function (data) {
                         var text = (data && (data.text || data.answer || (data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content))) || "";
-                        if (text) cb(null, { provider: "Cloudflare-AI", text: text, raw: data });
-                        else cb(new Error("cf_empty"), null);
+                        if (text) done(null, { provider: "Cloudflare-AI", text: text, raw: data });
+                        else done(new Error("cf_empty"), null);
                     }).catch(function () {
-                        cb(new Error("all_failed"), null);
+                        done(new Error("all_failed"), null);
                     });
                 }
 
@@ -7304,17 +7310,16 @@ var IndoorRouter = (function () {
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify(payload)
                 }).then(function (r) {
-                    if (timedOut) return;
-                    clearTimeout(timer);
+                    if (timedOut || cbDone) return;
                     if (!r.ok) throw new Error("HTTP " + r.status);
                     return r.json();
                 }).then(function (data) {
-                    if (timedOut) return;
+                    if (timedOut || cbDone) return;
                     var text = (data && (data.text || data.answer || (data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content))) || "";
-                    if (text) cb(null, { provider: provider.name, text: text, raw: data });
+                    if (text) done(null, { provider: provider.name, text: text, raw: data });
                     else tryCfFallback();
                 }).catch(function () {
-                    if (timedOut) return;
+                    if (timedOut || cbDone) return;
                     clearTimeout(timer);
                     tryCfFallback();
                 });
@@ -8736,8 +8741,16 @@ var IndoorRouter = (function () {
             /* 图片直传 AI 多模态：不再强制 OCR，文本框仅用于粘贴/手动输入补充 */
             var aiBtn = document.getElementById("wqAiBtn");
             if (aiBtn) { aiBtn.disabled = true; aiBtn.textContent = "⏳ 分析中…"; }
+            /* 超时安全网：60s 未返回则走规则兜底，避免永远卡在"分析中" */
+            _wqAiTimer = setTimeout(function () {
+                _wqAiTimer = null;
+                console.warn("[WQ] AI 分析超时，启用规则兜底");
+                runWQRuleFallback(text);
+            }, 60000);
             /* 智能分析：学科/题型/难度(10级)/知识点/错因，有图片则直传AI多模态识别 */
             aiAnalyzeQuestion(text, function (err, aiResult) {
+                /* AI 返回，清除超时安全网 */
+                if (_wqAiTimer) { clearTimeout(_wqAiTimer); _wqAiTimer = null; }
                 /* === 多题：全部逐题分析，用户可切换查看 === */
                 if (!err && aiResult && Array.isArray(aiResult.questions) && aiResult.questions.length > 1) {
                     _wqMultiQuestions = aiResult.questions.map(function (q) {
@@ -8807,6 +8820,44 @@ var IndoorRouter = (function () {
                 if (aiBtn) { aiBtn.disabled = false; aiBtn.textContent = "🔍 分析题目"; }
                 _wqAiTimer = null;
             }, _wqImg);
+        }
+
+        /* AI 分析超时/失败时的规则兜底：用本地规则完成分析并展示，避免卡在"分析中" */
+        function runWQRuleFallback(text) {
+            var aiBtn = document.getElementById("wqAiBtn");
+            if (aiBtn) { aiBtn.disabled = false; aiBtn.textContent = "🔍 分析题目"; }
+            showToast("AI 响应超时，已切换为本地规则分析");
+            _wqOrigText = text;
+            _wqSubject = detectSubject(text);
+            _wqQtype = detectQType(text);
+            _wqKps = detectKnowledgePoints(text, _wqSubject);
+            _wqDiff = estimateDifficulty(text);
+            _wqError = detectErrorCause(text, _wqQtype, _wqDiff);
+            _wqCritique = critiqueQuestion(text, _wqQtype);
+            _wqMastery = {};
+            var _backBtn = document.getElementById("wqBackToList");
+            if (_backBtn) _backBtn.style.display = "none";
+            var subjText = document.getElementById("wqSubjectText");
+            if (subjText) subjText.textContent = _wqSubject || "—";
+            var qtypeText = document.getElementById("wqQtypeText");
+            if (qtypeText) qtypeText.textContent = _wqQtype || "—";
+            var kpBox = document.getElementById("wqKpTags");
+            if (kpBox) {
+                if (_wqKps.length) {
+                    kpBox.innerHTML = _wqKps.map(function (k) { return '<span class="wq-kp-tag">' + esc(k) + '</span>'; }).join("");
+                } else {
+                    kpBox.innerHTML = '<span style="color:#94a3b8;font-size:12px">未识别到明确知识点，将按学科推荐</span>';
+                }
+            }
+            var diffBox = document.getElementById("wqDiffStars");
+            if (diffBox) {
+                diffBox.innerHTML = wqDiffBar(_wqDiff) +
+                                    '<span class="wq-diff-label">' + (WQ_DIFF_LABELS[_wqDiff] || "L" + _wqDiff) + '</span>';
+            }
+            renderWQErrorSelector();
+            var aiResultEl = document.getElementById("wqAiResult");
+            if (aiResultEl) aiResultEl.style.display = "block";
+            renderWQRecommend();
         }
 
         /* 多题列表：展示所有识别到的题目及分析状态，点击切换查看 */
