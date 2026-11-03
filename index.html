@@ -7388,14 +7388,39 @@ var IndoorRouter = (function () {
         };
 
         /* ================================================================
+         * 联网搜索：调用 /api/search 获取最新信息，用于时新消息类题目
+         * 返回 [{title, url, snippet}, ...] 或空数组
+         * ================================================================ */
+        function webSearch(query, cb) {
+            if (!query || !query.trim()) { cb(null, []); return; }
+            fetch("/api/search?q=" + encodeURIComponent(query.trim()), { method: "GET" })
+                .then(function (r) { return r.json(); })
+                .then(function (data) {
+                    var results = (data && data.results) || [];
+                    cb(null, results.slice(0, 6));
+                })
+                .catch(function (e) {
+                    console.warn("[webSearch] failed:", e && e.message);
+                    cb(null, []);
+                });
+        }
+
+        /* 时新消息检测：判断题目是否涉及需要联网获取最新信息的内容 */
+        var TIME_SENSITIVE_KW = /最近|近期|刚刚|今天|昨天|最新|当前|现在|本年|今年|本月|争议|风波|舆论|事件|新闻|热点|赛季|转会|签约|退役|复出|夺冠|冠军|决赛|世界杯|欧冠|英超|西甲|意甲|德甲|法甲|中超|NBA|CBA|亚冠|梅西|C罗|姆巴佩|内马尔|哈兰德|詹姆斯|库里|科比|版本更新|补丁|削弱|增强|发布|上线|上映|开播|去世|结婚|离婚|怀孕|当选|上任|辞职|价格|股价|汇率|利率|人口|GDP|通胀|嫦娥|王者|英雄|手游|端游|电竞|战队/;
+        function isTimeSensitive(text) {
+            if (!text) return false;
+            return TIME_SENSITIVE_KW.test(text);
+        }
+
+        /* ================================================================
          * AI 智能分析：学科 / 题型 / 难度(1-10级) / 知识点
-         * 替换原规则判断，全部由 AI 完成，难度按知识点全人类分10级
-         * 输出：{ subject, qtype, diff(1-10), kps:[], errorCause }
+         * 全部由 AI 完成，难度按知识点全人类分10级
+         * 输出：{ subject, qtype, diff(1-10), kps:[], errorCause, timeSensitive }
          * ================================================================ */
         function aiAnalyzeQuestion(text, cb, imgDataUrl) {
             if (!WQ_AI_CONFIG.enabled) { cb(new Error("ai_disabled"), null); return; }
             var sysPrompt = "你是一位经验丰富的教研组长。请分析题目，严格按JSON返回（不要其他文字）：" +
-                '{"subject":"学科(数学/物理/化学/生物/语文/英语/政治/历史/地理/其他)","qtype":"题型(选择题/填空题/解答题/证明题/计算题/简答题/作文/阅读理解/其他)","diff":1-10,"kps":["知识点1","知识点2"],"errorCause":"最可能的错因(careless粗心/concept概念不清/method方法未掌握/comprehensive综合能力不足/review审题失误)"}' +
+                '{"subject":"学科(数学/物理/化学/生物/语文/英语/政治/历史/地理/体育/其他)","qtype":"题型(选择题/填空题/解答题/证明题/计算题/简答题/作文/阅读理解/其他)","diff":1-10,"kps":["知识点1","知识点2"],"errorCause":"最可能的错因(careless粗心/concept概念不清/method方法未掌握/comprehensive综合能力不足/review审题失误)","timeSensitive":true/false}' +
                 "【学科判断要宽泛，禁止轻易返回「其他」】" +
                 "现代物理（宇宙、高维、弦理论、量子、相对论、黑洞、引力、粒子、暗物质、时空、维度等）属于物理；" +
                 "前沿化学（纳米、材料、分子机器、催化等）属于化学；" +
@@ -7408,6 +7433,7 @@ var IndoorRouter = (function () {
                 "7=综合建模(建立模型+多知识点融合)，8=思想方法(分类讨论/数形结合/构造等高级思想)，" +
                 "9=拓展探究(竞赛级/需构造/非常规解法)，10=原创研究(科研级/开放性/无固定解法)。" +
                 "【严格上限】常规求导/零点/参数范围/单调性/极值题≤8；只有竞赛题、需构造辅助函数、证明复杂不等式、组合计数等才给9；只有科研级开放题才给10。知识点要精准，2-4个。" +
+                "【timeSensitive 字段】若题目涉及体育赛事/明星动态/游戏版本/时事热点/政策法规/统计数据等可能随时间变化的内容，timeSensitive 设为 true，否则 false。" +
                 "【重要】返回的 JSON 中必须包含 \"text\" 字段：若有图片，text 为从图片中提取的完整题目原文（不要只写用户输入的指令）；若无图片，text 为用户输入的题目原文。" +
                 "\n【多题检测（灵活判断）】仅当内容中存在多道彼此独立、各自有完整题干和答案的题目时才拆分。" +
                 "判断原则：① 对话/聊天记录/连续段落/阅读理解（含多个小问但共享同一材料）→ 视为【一道题】，不要拆分；" +
@@ -7448,6 +7474,7 @@ var IndoorRouter = (function () {
                         q.subject = q.subject || "其他";
                         q.qtype = q.qtype || "解答题";
                         q.kps = (q.kps || []).filter(function (k) { return k && k.length; });
+                        q.timeSensitive = q.timeSensitive === true || isTimeSensitive(q.text || "");
                         return q;
                     });
                     cb(null, result);
@@ -7458,6 +7485,7 @@ var IndoorRouter = (function () {
                 result.subject = result.subject || "其他";
                 result.qtype = result.qtype || "解答题";
                 result.kps = (result.kps || []).filter(function (k) { return k && k.length; });
+                result.timeSensitive = result.timeSensitive === true || isTimeSensitive(text || "");
                 cb(null, result);
             });
         }
@@ -7548,13 +7576,18 @@ var IndoorRouter = (function () {
          * 输入：原题文本、学科、知识点、原题难度
          * 输出：{ explain, mother:{text,answer,kpExplain,relation}, recs:[{text,answer,solution,diff,layer}] }
          * ================================================================ */
-        function aiFullPipeline(text, subject, kps, origDiff, cbs) {
+        function aiFullPipeline(text, subject, kps, origDiff, cbs, searchContext) {
             /* cbs: { onExplain(text), onMother(mother), onRecs(recs), onDone(err) }
+             * searchContext: 联网搜索结果文本（时敏题传入），为 null 时不使用
              * 采用流式分段输出：讲解 → 母题 → 推荐题，讲解秒级首字呈现 */
             if (!WQ_AI_CONFIG.enabled) { if (cbs.onDone) cbs.onDone(new Error("ai_disabled")); return; }
             var kpList = (kps && kps.length) ? kps.join("、") : "（请根据题目内容判断）";
             var d = Math.max(1, Math.min(10, origDiff || 5));
             var targetD = Math.min(10, d + 1); /* 严格 L+1，满级推满级 */
+            var hasSearch = searchContext && searchContext.trim().length > 0;
+            var searchBlock = hasSearch
+                ? "\n【联网搜索结果（最新信息，请优先参考）】\n" + searchContext + "\n以上为联网获取的最新信息，解答时请优先采用其中的最新数据和事实，不要使用过时信息。\n"
+                : "";
             var sysPrompt = "你是一位" + (subject || "全科") + "金牌讲师。请严格按以下分段格式输出（先讲解，再母题，最后推荐题）：\n\n" +
                 "##讲解##\n<【讲透原题——讲解要细致，从最基础的概念讲起，不假设学生有任何前置知识，用大白话把每个概念和步骤讲清楚】\n" +
                 "讲解要求：\n" +
@@ -7564,20 +7597,22 @@ var IndoorRouter = (function () {
                 "4. 最后给出明确答案；\n" +
                 "5. 点出学生最容易犯的错或最容易卡住的地方。\n" +
                 "【答案正确性自校】输出前请自检：①答案是否符合题目条件？②推理步骤是否每一步都成立？③是否有更优/更标准的解法？如发现错误请立即修正后再输出。\n" +
-                "【时效性】若题目涉及体育赛事、明星动态、游戏版本、时事热点等可能随时间变化的内容，请基于你最新的知识库给出最准确的回答，不要使用过时的年份或数据。如果你不确定最新情况，就基于你掌握的最新信息回答，不要刻意强调知识截止。\n" +
+                (hasSearch
+                    ? "【时效性-联网模式】本题涉及时效性内容，上方已附上联网搜索到的最新信息。请务必基于搜索结果中的最新事实作答，若搜索结果与你的知识库冲突，以搜索结果为准。"
+                    : "【时效性】若题目涉及体育赛事、明星动态、游戏版本、时事热点等可能随时间变化的内容，请基于你最新的知识库给出最准确的回答，不要使用过时的年份或数据。如果你不确定最新情况，就基于你掌握的最新信息回答，不要刻意强调知识截止。") +
+                searchBlock +
                 "数学公式用LaTeX，如$x^2$、$\\frac{a}{b}$。配图要准确恰当、与内容相关，在需要可视化辅助理解的位置插入 [IMG:一句话精确描述图的内容]，例如[IMG:正四面体ABCD，每条棱接电阻R，求AB间等效电阻]。只要配图与内容相关且有助于理解就可以配，不要配无关图片。>\n\n" +
                 "##母题##\n题干：<追溯到该知识点最根本、最原型的母题题干>\n答案：<母题答案与解析>\n知识点：<讲透母知识点：本质、定义、核心公式/定理、适用边界、常见误区，覆盖所有知识源，精当概括>\n演变：<原题如何从母题演变而来>\n\n" +
-                "##推荐##\n<JSON数组，3道题，严禁与原题题型重复或照抄做法，以知识点为根可拓展深化探索>\n" +
+                "##推荐##\n<JSON数组，必须输出3道题，严禁省略！严禁与原题题型重复或照抄做法，以知识点为根可拓展深化探索>\n" +
                 '格式：[{"text":"题干（单行，不要换行）","answer":"答案","solution":"解析","diff":' + targetD + ',"layer":"基础|变式|拔高"}]\n' +
-                "难度要求：3道题难度均为L" + targetD + "（原题L" + d + "的+1级，满级则推满级L10），分别侧重基础巩固、变式迁移、拓展探究。数学公式用LaTeX。题干必须单行输出，不要插入换行。\n\n" +
+                "【重要】推荐题必须输出，无论题目类型如何，都必须生成3道分层推荐题。若原题非标准学科题，则围绕题目涉及的主题/领域生成3道同领域进阶题。难度均为L" + targetD + "，分别侧重基础巩固、变式迁移、拓展探究。数学公式用LaTeX。题干必须单行输出，不要插入换行。\n\n" +
                 "##END##";
             var messages = [
                 { role: "system", content: sysPrompt },
                 { role: "user", content: "学科：" + (subject || "未确定") + "\n知识点：" + kpList + "\n原题难度：L" + d + "\n原题：" + text }
             ];
             /* 时敏问题（近期事件/明星/体育/游戏版本）→ 路由到知识更新更快的模型 */
-            var timeSensitiveKws = /最近|近期|刚刚|今天|昨天|最新|争议|风波|事件|新闻|赛季|转会|版本更新|补丁|削弱|增强|发布|上映|去世|结婚|离婚|复出|退役|夺冠|冠军|世界杯|欧冠|NBA|CBA|英超|西甲|意甲|德甲|法甲|姆巴佩|梅西|C罗|内马尔|哈兰德|嫦娥|王者|英雄/;
-            var taskType = timeSensitiveKws.test(text) ? "current" : "pipeline";
+            var taskType = (hasSearch || _wqTimeSensitive) ? "current" : "pipeline";
 
             var acc = "";
             var stage = "explain"; /* explain -> mother -> recs -> done */
@@ -7928,6 +7963,7 @@ var IndoorRouter = (function () {
         var _wqActiveMultiIdx = -1;    // 当前查看的多题索引
         var _wqMultiQueueBusy = false; // 后台分析队列是否运行中
         var _wqCurAnalysis = null;     // 当前题目的完整分析（讲解/母题/推荐），用于保存错题本和恢复
+        var _wqTimeSensitive = false;  // 当前题是否为时新消息类（需联网搜索）
 
         var WQ_STORAGE_VERSION = 2;  /* 错题存储格式版本号，更新时用于迁移 */
         function getWQ() {
@@ -8800,53 +8836,45 @@ var IndoorRouter = (function () {
             var aiBtn = document.getElementById("wqAiBtn");
             if (aiBtn) { aiBtn.disabled = true; aiBtn.textContent = "⚡ 分析中…"; }
 
-            /* === 秒级响应：先用本地规则立即出结果，不等 AI === */
             _wqOrigText = text;
-            _wqSubject = detectSubject(text);
-            _wqQtype = detectQType(text);
-            _wqKps = detectKnowledgePoints(text, _wqSubject);
-            _wqDiff = estimateDifficulty(text);
-            _wqError = detectErrorCause(text, _wqQtype, _wqDiff);
-            _wqCritique = critiqueQuestion(text, _wqQtype);
             _wqMastery = {};
-            /* 立即展示规则分析结果 */
+
+            /* === 立即展示结果面板骨架，学科/知识点由 AI 判断（显示分析中占位） === */
             var _backBtn = document.getElementById("wqBackToList");
             if (_backBtn) _backBtn.style.display = "none";
             var subjText = document.getElementById("wqSubjectText");
-            if (subjText) subjText.textContent = _wqSubject || "—";
+            if (subjText) subjText.textContent = "AI分析中…";
             var qtypeText = document.getElementById("wqQtypeText");
-            if (qtypeText) qtypeText.textContent = _wqQtype || "—";
+            if (qtypeText) qtypeText.textContent = "—";
             var kpBox = document.getElementById("wqKpTags");
-            if (kpBox) {
-                if (_wqKps.length) kpBox.innerHTML = _wqKps.map(function (k) { return '<span class="wq-kp-tag">' + esc(k) + '</span>'; }).join("");
-                else kpBox.innerHTML = '<span style="color:#94a3b8;font-size:12px">未识别到明确知识点，将按学科推荐</span>';
-            }
+            if (kpBox) kpBox.innerHTML = '<span style="color:#94a3b8;font-size:12px">正在由AI识别知识点…</span>';
             var diffBox = document.getElementById("wqDiffStars");
-            if (diffBox) diffBox.innerHTML = wqDiffBar(_wqDiff) + '<span class="wq-diff-label">' + (WQ_DIFF_LABELS[_wqDiff] || "L" + _wqDiff) + '</span>';
-            renderWQErrorSelector();
+            if (diffBox) diffBox.innerHTML = '<span style="color:#94a3b8;font-size:12px">评估中…</span>';
             document.getElementById("wqAiResult").style.display = "block";
-            /* 立即启动讲解流式输出（不等AI分析），保证秒级体感 */
-            try {
-                renderWQRecommend();
-            } catch (e) {
-                console.error("[WQ] renderWQRecommend error:", e);
-                var explBox = document.getElementById("wqAiExplainBox");
-                if (explBox) explBox.innerHTML = '<div style="color:#991b1b;font-size:13px;padding:8px">⚠ 渲染出错：' + esc(e.message) + '</div>';
-            }
-            /* 按钮始终重置，避免卡死在"分析中" */
-            if (aiBtn) { aiBtn.disabled = false; aiBtn.textContent = "🔍 分析题目"; }
 
-            /* === 后台 AI 精修：异步优化学科/知识点/难度，检测多题 === */
-            var aiRefineTimer = setTimeout(function () {
-                console.warn("[WQ] AI 精修超时，保留规则分析结果");
-            }, 30000);
+            /* === 学科/知识点/难度 全部由 AI 判断 === */
+            var aiTimeout = setTimeout(function () {
+                /* AI 超时 → 规则兜底 */
+                console.warn("[WQ] AI 分析超时，切换规则兜底");
+                applyAnalysis({ subject: detectSubject(text), qtype: detectQType(text),
+                    kps: detectKnowledgePoints(text, detectSubject(text)), diff: estimateDifficulty(text),
+                    errorCause: detectErrorCause(text, detectQType(text), estimateDifficulty(text)), timeSensitive: isTimeSensitive(text) });
+            }, 12000);
+
             aiAnalyzeQuestion(text, function (err, aiResult) {
-                if (aiRefineTimer) { clearTimeout(aiRefineTimer); aiRefineTimer = null; }
-                if (err) return; /* AI 失败不影响已展示的规则结果 */
+                if (aiTimeout) { clearTimeout(aiTimeout); aiTimeout = null; }
+                if (err || !aiResult) {
+                    /* AI 失败 → 规则兜底 */
+                    applyAnalysis({ subject: detectSubject(text), qtype: detectQType(text),
+                        kps: detectKnowledgePoints(text, detectSubject(text)), diff: estimateDifficulty(text),
+                        errorCause: detectErrorCause(text, detectQType(text), estimateDifficulty(text)), timeSensitive: isTimeSensitive(text) });
+                    return;
+                }
                 /* 多题检测到 → 切换多题模式 */
-                if (aiResult && Array.isArray(aiResult.questions) && aiResult.questions.length > 1) {
+                if (Array.isArray(aiResult.questions) && aiResult.questions.length > 1) {
+                    if (aiBtn) { aiBtn.disabled = false; aiBtn.textContent = "🔍 分析题目"; }
                     _wqMultiQuestions = aiResult.questions.map(function (q) {
-                        return { text: q.text || "", subject: q.subject, qtype: q.qtype, kps: q.kps || [], diff: q.diff || 5, errorCause: q.errorCause, status: "pending", explain: null, mother: null, recs: null };
+                        return { text: q.text || "", subject: q.subject, qtype: q.qtype, kps: q.kps || [], diff: q.diff || 5, errorCause: q.errorCause, timeSensitive: q.timeSensitive, status: "pending", explain: null, mother: null, recs: null };
                     });
                     _wqActiveMultiIdx = 0;
                     showMultiQuestionSelector();
@@ -8854,24 +8882,43 @@ var IndoorRouter = (function () {
                     analyzeMultiQueue(1);
                     return;
                 }
-                /* 单题：用 AI 结果精修学科/知识点/难度（不重启讲解） */
-                if (aiResult) {
-                    if (_wqImg && aiResult.text) _wqOrigText = aiResult.text;
-                    if (aiResult.subject) _wqSubject = aiResult.subject;
-                    if (aiResult.qtype) _wqQtype = aiResult.qtype;
-                    if (aiResult.kps && aiResult.kps.length) _wqKps = aiResult.kps;
-                    if (aiResult.diff) _wqDiff = aiResult.diff;
-                    if (aiResult.errorCause) _wqError = aiResult.errorCause;
-                    /* 更新展示 */
-                    if (subjText) subjText.textContent = _wqSubject || "—";
-                    if (qtypeText) qtypeText.textContent = _wqQtype || "—";
-                    if (kpBox) {
-                        if (_wqKps.length) kpBox.innerHTML = _wqKps.map(function (k) { return '<span class="wq-kp-tag">' + esc(k) + '</span>'; }).join("");
-                        else kpBox.innerHTML = '<span style="color:#94a3b8;font-size:12px">未识别到明确知识点，将按学科推荐</span>';
-                    }
-                    if (diffBox) diffBox.innerHTML = wqDiffBar(_wqDiff) + '<span class="wq-diff-label">' + (WQ_DIFF_LABELS[_wqDiff] || "L" + _wqDiff) + '</span>';
-                }
+                /* 单题：用 AI 结果 */
+                applyAnalysis({
+                    subject: aiResult.subject, qtype: aiResult.qtype, kps: aiResult.kps,
+                    diff: aiResult.diff, errorCause: aiResult.errorCause, timeSensitive: aiResult.timeSensitive,
+                    text: aiResult.text
+                });
             }, _wqImg);
+
+            /* 统一应用分析结果（AI 或规则兜底），然后渲染推题 */
+            function applyAnalysis(res) {
+                if (res.text) _wqOrigText = res.text;
+                _wqSubject = res.subject || "其他";
+                _wqQtype = res.qtype || "解答题";
+                _wqKps = res.kps || [];
+                _wqDiff = res.diff || 5;
+                _wqError = res.errorCause || "method";
+                _wqTimeSensitive = res.timeSensitive === true;
+                _wqCritique = critiqueQuestion(_wqOrigText, _wqQtype);
+                /* 更新展示 */
+                if (subjText) subjText.textContent = _wqSubject + (_wqTimeSensitive ? ' 🔍' : "");
+                if (qtypeText) qtypeText.textContent = _wqQtype || "—";
+                if (kpBox) {
+                    if (_wqKps.length) kpBox.innerHTML = _wqKps.map(function (k) { return '<span class="wq-kp-tag">' + esc(k) + '</span>'; }).join("");
+                    else kpBox.innerHTML = '<span style="color:#94a3b8;font-size:12px">未识别到明确知识点，将按学科推荐</span>';
+                }
+                if (diffBox) diffBox.innerHTML = wqDiffBar(_wqDiff) + '<span class="wq-diff-label">' + (WQ_DIFF_LABELS[_wqDiff] || "L" + _wqDiff) + '</span>';
+                renderWQErrorSelector();
+                if (aiBtn) { aiBtn.disabled = false; aiBtn.textContent = "🔍 分析题目"; }
+                /* 启动讲解+推题流式管线（时敏题会自动联网搜索） */
+                try {
+                    renderWQRecommend();
+                } catch (e) {
+                    console.error("[WQ] renderWQRecommend error:", e);
+                    var explBox = document.getElementById("wqAiExplainBox");
+                    if (explBox) explBox.innerHTML = '<div style="color:#991b1b;font-size:13px;padding:8px">⚠ 渲染出错：' + esc(e.message) + '</div>';
+                }
+            }
         }
 
         /* AI 分析超时/失败时的规则兜底：用本地规则完成分析并展示，避免卡在"分析中" */
@@ -9069,6 +9116,7 @@ var IndoorRouter = (function () {
                 }
             }, 90000);
             try {
+                _wqTimeSensitive = q.timeSensitive === true;
                 aiFullPipeline(q.text, q.subject, q.kps, q.diff, {
                 onExplain: function (text) {
                     q.explain = text;
@@ -9755,7 +9803,7 @@ var IndoorRouter = (function () {
                 var el = document.getElementById("wqRecList");
                 if (el) {
                     if (html) el.innerHTML = html;
-                    else if (isNonStandard) el.innerHTML = '<div style="color:#92400e;background:#fffbeb;border:1px solid #fde68a;border-radius:8px;padding:16px;text-align:center;font-size:13px;line-height:1.7">⚠ 未识别到明确学科与知识点，暂不生成推荐题。<br>请在上方手动选择学科，或输入一道标准学科题后重试。</div>';
+                    else if (isNonStandard) el.innerHTML = '<div style="color:#6366f1;padding:16px;text-align:center;font-size:13px;line-height:1.7">🤖 AI 正在围绕题目主题生成分层推荐题，请稍候…</div>';
                     else el.innerHTML = '<div style="color:#64748b;padding:16px;text-align:center">已为你生成知识点拓展练习，请尝试完成</div>';
                 }
             }
@@ -9774,8 +9822,12 @@ var IndoorRouter = (function () {
                             '</div>';
                     }
                 }, 20000);
-                try {
-                    aiFullPipeline(origText, sub, _wqKps, origDiff, {
+
+                /* 时敏题：先联网搜索获取最新信息，再传给 AI 管线 */
+                var needSearch = _wqTimeSensitive === true;
+                var runPipeline = function (searchCtx) {
+                    try {
+                        aiFullPipeline(origText, sub, _wqKps, origDiff, {
                         /* ① 讲解：流式逐字渲染，首字秒级呈现 */
                         onExplain: function (text) {
                             if (explainWatchdog) { clearTimeout(explainWatchdog); explainWatchdog = null; }
@@ -9854,8 +9906,27 @@ var IndoorRouter = (function () {
                                 }
                             }
                         }
+                    }, searchCtx);
+                    } catch (e) { /* 异常不影响已有展示 */ }
+                };
+
+                /* 时敏题联网搜索获取最新信息，普通题直接执行管线 */
+                if (needSearch) {
+                    var explBox0 = document.getElementById("wqAiExplainBox");
+                    if (explBox0) explBox0.innerHTML = '<div style="color:#0369a1;font-size:13px;padding:8px 0">🔍 正在联网搜索最新信息…</div>';
+                    var searchQuery = (origText || "").slice(0, 80);
+                    webSearch(searchQuery, function (err, results) {
+                        var ctx = "";
+                        if (results && results.length) {
+                            ctx = results.map(function (r, i) {
+                                return (i + 1) + ". " + (r.title || "") + "：" + (r.snippet || "");
+                            }).join("\n");
+                        }
+                        runPipeline(ctx);
                     });
-                } catch (e) { /* 异常不影响已有展示 */ }
+                } else {
+                    runPipeline(null);
+                }
             }
 
             /* ---- 追问问答功能：多轮对话 + 历史持久化 ---- */
@@ -9901,39 +9972,60 @@ var IndoorRouter = (function () {
                 var explainText = explainBox ? explainBox.textContent || "" : "";
                 var contextText = "原题：" + (_wqOrigText || origText || "") + "\n讲解：" + explainText.slice(0, 1500);
                 /* 时敏问题检测：近期事件/明星/体育/游戏版本/新闻 → 路由到知识更新更快的模型 */
-                var timeSensitiveKws = /最近|近期|刚刚|今天|昨天|本月|今年|最新|争议|风波|事件|新闻|赛季|转会|版本更新|更新了|补丁|削弱|增强|发布|上映|去世|结婚|离婚|复出|退役|夺冠|冠军|世界杯|欧冠|NBA|CBA|英超|西甲|意甲|德甲|法甲|姆巴佩|梅西|C罗|内马尔|哈兰德/;
-                var taskType = timeSensitiveKws.test(q) ? "current" : "pipeline";
+                var qaTimeSensitive = isTimeSensitive(q);
+                var taskType = qaTimeSensitive ? "current" : "pipeline";
                 var messages = [
                     { role: "system", content: "你是一位耐心的" + (sub || "全科") + "老师。学生对讲透原题的讲解有疑问，请用通俗易懂的方式解答。" +
                         "如果学生问的是讲解中某一步，先回顾那一步再解释。数学公式用LaTeX。回答要具体，不要空泛。" +
                         "【配图】配图要准确恰当、与内容相关，有助于理解就可以配，用 [IMG:描述] 标记，不要配无关图片。" },
                     { role: "user", content: contextText + "\n\n学生疑问：" + q }
                 ];
-                /* 流式输出：首字秒级呈现 */
-                var fullAnswer = "";
-                var done = false;
-                WQ_AI_ROUTER.callStream(messages, taskType, function (fullText, delta) {
-                    var tempEl = document.getElementById(tempId);
-                    if (!tempEl) return;
-                    fullAnswer = fullText || "";
-                    tempEl.innerHTML = '<b>A:</b> ' + renderDiagramMarkers(fullAnswer, sub);
-                    box.scrollTop = box.scrollHeight;
-                }, function (err) {
-                    if (done) return;
-                    done = true;
-                    var tempEl = document.getElementById(tempId);
-                    if (err) {
-                        if (tempEl && fullAnswer === "") tempEl.innerHTML = '<b>A:</b> <span style="color:#991b1b">回答失败，请重试</span>';
-                    } else if (fullAnswer) {
-                        /* 持久化到 localStorage */
-                        var history = [];
-                        try { history = JSON.parse(localStorage.getItem(wqQaStorageKey()) || "[]"); } catch (e) {}
-                        history.push({ q: q, a: fullAnswer.trim(), ts: Date.now() });
-                        try { localStorage.setItem(wqQaStorageKey(), JSON.stringify(history.slice(-20))); } catch (e) {}
+                /* 时敏追问：先联网搜索，再把最新信息注入 system prompt */
+                var runQa = function (searchCtx) {
+                    if (searchCtx) {
+                        messages[0].content += "\n【联网搜索到的最新信息】\n" + searchCtx + "\n请优先参考以上最新信息作答。";
                     }
-                    if (input) input.disabled = false;
-                    input.focus();
-                });
+                    /* 流式输出：首字秒级呈现 */
+                    var fullAnswer = "";
+                    var done = false;
+                    WQ_AI_ROUTER.callStream(messages, taskType, function (fullText, delta) {
+                        var tempEl = document.getElementById(tempId);
+                        if (!tempEl) return;
+                        fullAnswer = fullText || "";
+                        tempEl.innerHTML = '<b>A:</b> ' + renderDiagramMarkers(fullAnswer, sub);
+                        box.scrollTop = box.scrollHeight;
+                    }, function (err) {
+                        if (done) return;
+                        done = true;
+                        var tempEl = document.getElementById(tempId);
+                        if (err) {
+                            if (tempEl && fullAnswer === "") tempEl.innerHTML = '<b>A:</b> <span style="color:#991b1b">回答失败，请重试</span>';
+                        } else if (fullAnswer) {
+                            /* 持久化到 localStorage */
+                            var history = [];
+                            try { history = JSON.parse(localStorage.getItem(wqQaStorageKey()) || "[]"); } catch (e) {}
+                            history.push({ q: q, a: fullAnswer.trim(), ts: Date.now() });
+                            try { localStorage.setItem(wqQaStorageKey(), JSON.stringify(history.slice(-20))); } catch (e) {}
+                        }
+                        if (input) input.disabled = false;
+                        input.focus();
+                    });
+                };
+                if (qaTimeSensitive) {
+                    var tempEl0 = document.getElementById(tempId);
+                    if (tempEl0) tempEl0.innerHTML = '<b>A:</b> <span style="color:#0369a1">🔍 正在联网搜索最新信息…</span>';
+                    webSearch(q.slice(0, 80), function (err, results) {
+                        var ctx = "";
+                        if (results && results.length) {
+                            ctx = results.map(function (r, i) {
+                                return (i + 1) + ". " + (r.title || "") + "：" + (r.snippet || "");
+                            }).join("\n");
+                        }
+                        runQa(ctx);
+                    });
+                } else {
+                    runQa(null);
+                }
             }
             /* 暴露到全局供 inline onclick 调用 */
             window.wqLoadQaHistory = wqLoadQaHistory;
