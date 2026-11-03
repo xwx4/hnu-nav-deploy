@@ -5749,7 +5749,11 @@ var IndoorRouter = (function () {
                      "最小值", "最大值", "取值范围", "求证", "正数", "实数", "参数", "定义域", "值域", "解集"],
             "物理": ["力学", "电磁", "磁场", "电场", "光学", "热学", "运动", "能量", "动量", "波动", "电路", "牛顿",
                      "加速度", "速度", "位移", "动能", "势能", "电阻", "电压", "电流", "功率", "焦耳",
-                     "kg", "m/s", "m/s²", "N/", "Ω", "V", "A", "Wb", "T", "Hz"],
+                     "kg", "m/s", "m/s²", "N/", "Ω", "V", "A", "Wb", "T", "Hz",
+                     "宇宙", "高维", "维度", "弦理论", "量子", "相对论", "时空", "黑洞", "引力", "粒子",
+                     "暗物质", "暗能量", "大爆炸", "宇宙学", "普朗克", "超弦", "膜理论", "虫洞", "奇点",
+                     "熵", "热力学", "统计物理", "凝聚态", "半导体", "超导", "纳米", "光子", "电子",
+                     "衰变", "裂变", "聚变", "核反应", "原子物理", "波粒二象性", "不确定性原理"],
             "化学": ["反应", "分子", "原子", "元素", "化合物", "溶液", "酸碱", "氧化还原", "有机",
                      "摩尔", "离子", "化学键", "烃", "醇", "酯", "配平", "电解", "原电池",
                      "mol", "pH", "H₂", "O₂", "CO₂", "→", "⇌", "KMnO₄", "NaOH", "HCl", "沉淀"],
@@ -7357,6 +7361,12 @@ var IndoorRouter = (function () {
             if (!WQ_AI_CONFIG.enabled) { cb(new Error("ai_disabled"), null); return; }
             var sysPrompt = "你是一位经验丰富的教研组长。请分析题目，严格按JSON返回（不要其他文字）：" +
                 '{"subject":"学科(数学/物理/化学/生物/语文/英语/政治/历史/地理/其他)","qtype":"题型(选择题/填空题/解答题/证明题/计算题/简答题/作文/阅读理解/其他)","diff":1-10,"kps":["知识点1","知识点2"],"errorCause":"最可能的错因(careless粗心/concept概念不清/method方法未掌握/comprehensive综合能力不足/review审题失误)"}' +
+                "【学科判断要宽泛，禁止轻易返回「其他」】" +
+                "现代物理（宇宙、高维、弦理论、量子、相对论、黑洞、引力、粒子、暗物质、时空、维度等）属于物理；" +
+                "前沿化学（纳米、材料、分子机器、催化等）属于化学；" +
+                "生物医学（基因编辑、细胞、药物、免疫等）属于生物；" +
+                "科普类题目只要涉及具体学科知识就归入该学科，不要因为像科普就判其他。" +
+                "【只有纯闲聊、脑筋急转弯、无学科内容的题目才返回「其他」】。拿不准时选最接近的学科。" +
                 "难度说明（全人类认知深度10级，严格校准，宁低勿高）：" +
                 "1=概念识记(背定义/公式)，2=直接套用(代入公式一步出答案)，3=简单综合(2-3知识点直接应用)，" +
                 "4=变式应用(需变形/换元)，5=方法迁移(选方法+多步计算)，6=多步推理(3步以上逻辑链)，" +
@@ -7510,8 +7520,15 @@ var IndoorRouter = (function () {
             var kpList = (kps && kps.length) ? kps.join("、") : "（请根据题目内容判断）";
             var d = Math.max(1, Math.min(10, origDiff || 5));
             var targetD = Math.min(10, d + 1); /* 严格 L+1，满级推满级 */
-            var sysPrompt = "你是一位" + (subject || "全科") + "教研专家。请严格按以下分段格式输出（先讲解，再母题，最后推荐题）：\n\n" +
-                "##讲解##\n<原题完整讲解：思路+关键步骤+最终答案。数学公式用LaTeX，如$x^2$、$\\frac{a}{b}$。若讲解中需要配图（如几何图形、电路图、受力分析图、化学装置等），在该位置插入 [IMG:一句话描述图的内容]，例如[IMG:正四面体ABCD，每条棱接电阻R，求AB间等效电阻]。精炼，不啰嗦>\n\n" +
+            var sysPrompt = "你是一位" + (subject || "全科") + "金牌讲师。请严格按以下分段格式输出（先讲解，再母题，最后推荐题）：\n\n" +
+                "##讲解##\n<【讲透原题——假设学生全程上课昏睡，必须从零讲起】\n" +
+                "讲解要求：\n" +
+                "1. 先一句话点明这道题考什么知识点，为什么会有这道题；\n" +
+                "2. 把涉及的核心概念/公式用大白话解释一遍（像给没听课的学生补基础），不要假设学生记得；\n" +
+                "3. 给出完整解题步骤，每一步都说明'为什么这么做'，关键计算不能跳步；\n" +
+                "4. 最后给出明确答案；\n" +
+                "5. 点出学生最容易犯的错或最容易卡住的地方。\n" +
+                "数学公式用LaTeX，如$x^2$、$\\frac{a}{b}$。若讲解中需要配图（几何图形、电路图、受力分析图、化学装置等），在该位置插入 [IMG:一句话描述图的内容]，例如[IMG:正四面体ABCD，每条棱接电阻R，求AB间等效电阻]。>\n\n" +
                 "##母题##\n题干：<追溯到该知识点最根本、最原型的母题题干>\n答案：<母题答案与解析>\n知识点：<讲透母知识点：本质、定义、核心公式/定理、适用边界、常见误区，覆盖所有知识源，精当概括>\n演变：<原题如何从母题演变而来>\n\n" +
                 "##推荐##\n<JSON数组，3道题，严禁与原题题型重复或照抄做法，以知识点为根可拓展深化探索>\n" +
                 '格式：[{"text":"题干（单行，不要换行）","answer":"答案","solution":"解析","diff":' + targetD + ',"layer":"基础|变式|拔高"}]\n' +
@@ -8270,11 +8287,19 @@ var IndoorRouter = (function () {
             return "••••••••" + k.slice(-4);
         }
 
-        /* 题目配图生成：使用 Pollinations AI 免费文生图（无需 API Key，GET 请求直接返回图片）
+        /* 题目配图生成：确定性种子保证同一题目生成同一图（可被浏览器缓存，重复访问秒级加载）
+         * 配合 imgDiagramHTML 使用：首次显示加载占位，加载成功后缓存到 localStorage，后续秒级显示
          * @param {string} desc - 图片描述
          * @param {object} opts - { width, height, subject }
          * @returns {string} 图片 URL
          */
+        function diagramSeed(desc) {
+            /* 简单字符串哈希，保证同描述同种子 */
+            var s = String(desc || "");
+            var h = 0;
+            for (var i = 0; i < s.length; i++) { h = ((h << 5) - h) + s.charCodeAt(i); h |= 0; }
+            return Math.abs(h) || 1;
+        }
         function generateDiagram(desc, opts) {
             opts = opts || {};
             var w = opts.width || 640;
@@ -8286,8 +8311,33 @@ var IndoorRouter = (function () {
             else if (subj === "化学") styleTag = "chemistry diagram, molecular structure, clean educational illustration, ";
             else styleTag = "educational diagram, clear illustration, black on white, ";
             var prompt = styleTag + desc + ", high quality, no text labels";
+            /* 确定性种子：同描述同图，浏览器可缓存，重复访问秒级 */
+            var seed = diagramSeed(prompt);
             return "https://image.pollinations.ai/prompt/" + encodeURIComponent(prompt) +
-                "?width=" + w + "&height=" + h + "&nologo=true&seed=" + Math.floor(Math.random() * 100000);
+                "?width=" + w + "&height=" + h + "&nologo=true&seed=" + seed;
+        }
+        /* 生成配图 HTML：立即显示占位，图片加载成功后替换；缓存到 localStorage 实现秒级复用
+         * @param {string} desc - 图片描述
+         * @param {object} opts - { width, height, subject }
+         * @returns {string} HTML 字符串
+         */
+        function imgDiagramHTML(desc, opts) {
+            opts = opts || {};
+            var url = generateDiagram(desc, opts);
+            var cacheKey = "wq_img_" + diagramSeed(url);
+            /* 尝试从 localStorage 读缓存（秒级命中） */
+            var cached = null;
+            try { cached = localStorage.getItem(cacheKey); } catch (e) {}
+            if (cached) {
+                return '<div style="margin:10px 0;text-align:center"><img src="' + cached + '" alt="' + esc(desc) + '" style="max-width:100%;max-height:300px;border-radius:8px;border:1px solid #e2e8f0" onerror="this.style.display=\'none\'" /></div>';
+            }
+            /* 无缓存：显示加载占位 + 图片懒加载，加载成功后缓存 */
+            return '<div style="margin:10px 0;text-align:center;position:relative;min-height:120px;background:#f8fafc;border-radius:8px;border:1px dashed #cbd5e1;display:flex;align-items:center;justify-content:center">' +
+                '<span style="font-size:12px;color:#94a3b8">🖼 正在生成配图…</span>' +
+                '<img src="' + url + '" alt="' + esc(desc) + '" style="max-width:100%;max-height:300px;border-radius:8px;position:absolute;top:0;left:0;width:100%;height:100%;object-fit:contain;opacity:0;transition:opacity .3s" ' +
+                'onload="var s=this.style;s.opacity=1;this.parentElement.querySelector(\'span\').style.display=\'none\';try{var c=document.createElement(\'canvas\');var ctx=c.getContext(\'2d\');c.width=this.naturalWidth;c.height=this.naturalHeight;ctx.drawImage(this,0,0);localStorage.setItem(\'' + cacheKey + '\',c.toDataURL(\'image/jpeg\',0.85));}catch(e){}" ' +
+                'onerror="this.parentElement.innerHTML=\'<div style=\\\'font-size:12px;color:#94a3b8;padding:12px\\\'>📝 ' + esc(desc).replace(/'/g, "&#39;") + '</div>\'" />' +
+                '</div>';
         }
         /* 判断题目文本是否需要配图 */
         function needsDiagram(text) {
@@ -8306,11 +8356,10 @@ var IndoorRouter = (function () {
             });
             /* 先渲染数学公式 */
             s = renderMath(s);
-            /* 替换占位符为 <img> */
+            /* 替换占位符为配图（带缓存+加载状态） */
             s = s.replace(/\x00IMG(\d+)\x00/g, function (_, i) {
                 var desc = markers[parseInt(i)] || "";
-                var url = generateDiagram(desc, { subject: subject, width: 520, height: 360 });
-                return '<div style="margin:10px 0;text-align:center"><img src="' + url + '" alt="' + esc(desc) + '" style="max-width:100%;max-height:280px;border-radius:8px;border:1px solid #e2e8f0" onerror="this.style.display=\'none\'" /></div>';
+                return imgDiagramHTML(desc, { subject: subject, width: 520, height: 360 });
             });
             return s;
         }
@@ -9383,8 +9432,8 @@ var IndoorRouter = (function () {
                         '<div class="wq-deep-q">' + renderMath(decodeHtml(origText)) + '</div>' +
                         /* 显示用户上传的原题图片（若有） */
                         (_wqImg ? '<div style="margin:10px 0;text-align:center"><img src="' + esc(_wqImg) + '" alt="原题图片" style="max-width:100%;max-height:340px;border-radius:8px;border:1px solid #e2e8f0" /></div>' : '') +
-                        /* 题干提到图但无原图时，自动生成配图 */
-                        ((!_wqImg && needsDiagram(origText)) ? '<div style="margin:10px 0;text-align:center"><img src="' + generateDiagram(origText.replace(/[。，；].*$/, "").slice(0, 80), { subject: sub, width: 560, height: 400 }) + '" alt="题目配图" style="max-width:100%;max-height:300px;border-radius:8px;border:1px solid #e2e8f0" onerror="this.style.display=\'none\'" /></div>' : '') +
+                        /* 题干提到图但无原图时，自动生成配图（带缓存+加载状态） */
+                        ((!_wqImg && needsDiagram(origText)) ? imgDiagramHTML(origText.replace(/[。，；].*$/, "").slice(0, 80), { subject: sub, width: 560, height: 400 }) : '') +
                         '<div class="wq-deep-sections">' +
                             '<div class="wq-deep-sec"><b>考点：</b>' + kpStr + (featStr ? ' <b style="margin-left:10px">题型：</b>' + featStr : '') + '</div>';
 
@@ -9408,8 +9457,22 @@ var IndoorRouter = (function () {
                             '</div>';
                     }
 
+                    /* 问答框：对讲透原题的疑问，支持多轮追问，历史持久化 */
+                    dh += '<div id="wqQaBox" style="margin-top:14px;border-top:1px solid #e2e8f0;padding-top:12px">' +
+                        '<div style="font-size:13px;font-weight:600;color:#475569;margin-bottom:8px">💬 追问对讲透原题的疑问</div>' +
+                        '<div id="wqQaHistory" style="max-height:300px;overflow-y:auto;margin-bottom:8px"></div>' +
+                        '<div style="display:flex;gap:6px">' +
+                            '<input type="text" id="wqQaInput" placeholder="输入你对讲解的疑问，如：为什么这一步要这样做？" ' +
+                            'style="flex:1;padding:8px 10px;border:1px solid #cbd5e1;border-radius:6px;font-size:13px;outline:none" ' +
+                            'onkeydown="if(event.key===\'Enter\')wqSubmitQa()" />' +
+                            '<button type="button" onclick="wqSubmitQa()" style="padding:8px 14px;background:#6366f1;color:#fff;border:none;border-radius:6px;font-size:13px;cursor:pointer">提问</button>' +
+                        '</div>' +
+                        '</div>';
+
                     dh += '</div></div>';
                     deepEl.innerHTML = dh;
+                    /* 加载该题已保存的问答历史 */
+                    wqLoadQaHistory();
                     /* 讲解内容由下方一站式 aiFullPipeline 统一填充（秒级响应） */
                 } else {
                     deepEl.innerHTML = "";
@@ -9568,7 +9631,7 @@ var IndoorRouter = (function () {
                     html += '<div class="wq-rec-card' + (mastered === true ? ' mastered' : '') + (mastered === false ? ' not-mastered' : '') + '">' +
                         '<div class="wq-rec-q">' +
                             '<span class="wq-rec-q-text">' + renderMath(qText) + '</span>' +
-                            (needsDiagram(qText) ? '<div style="margin:6px 0;text-align:center"><img src="' + generateDiagram(qText.replace(/[。，；].*$/, "").slice(0, 60), { subject: sub, width: 480, height: 320 }) + '" alt="配图" style="max-width:100%;max-height:220px;border-radius:6px;border:1px solid #e2e8f0" onerror="this.style.display=\'none\'" /></div>' : '') +
+                            (needsDiagram(qText) ? imgDiagramHTML(qText.replace(/[。，；].*$/, "").slice(0, 60), { subject: sub, width: 480, height: 320 }) : '') +
                             '<span class="wq-rec-q-meta">' +
                                 '<span class="wq-rec-diff">' + wqDiffBar(q.diff) + '</span>' +
                                 (isTransfer ? '<span class="wq-transfer-tag">🔀 知识迁移</span>' : '') + genBadge + layerBadge +
@@ -9675,6 +9738,71 @@ var IndoorRouter = (function () {
                     });
                 } catch (e) { /* 异常不影响已有展示 */ }
             }
+
+            /* ---- 追问问答功能：多轮对话 + 历史持久化 ---- */
+            /* 生成该题的问答存储 key（基于原题文本哈希） */
+            function wqQaStorageKey() {
+                var t = (_wqOrigText || origText || "").slice(0, 200);
+                return "wq_qa_" + diagramSeed(t);
+            }
+            /* 加载并渲染该题已保存的问答历史 */
+            window.wqLoadQaHistory = function () {
+                var box = document.getElementById("wqQaHistory");
+                if (!box) return;
+                var history = [];
+                try { history = JSON.parse(localStorage.getItem(wqQaStorageKey()) || "[]"); } catch (e) {}
+                if (!history.length) { box.innerHTML = '<div style="font-size:12px;color:#94a3b8;text-align:center;padding:8px">暂无追问，有疑问随时提问 👇</div>'; return; }
+                box.innerHTML = history.map(function (item) {
+                    return '<div style="margin-bottom:8px">' +
+                        '<div style="background:#eef2ff;border-radius:8px;padding:8px 10px;font-size:13px;color:#1e293b"><b>Q:</b> ' + esc(item.q) + '</div>' +
+                        '<div style="background:#f8fafc;border-radius:8px;padding:8px 10px;font-size:13px;color:#334155;margin-top:4px;line-height:1.6"><b>A:</b> ' + renderDiagramMarkers(item.a || "", sub) + '</div>' +
+                        '</div>';
+                }).join("");
+                box.scrollTop = box.scrollHeight;
+            };
+            /* 提交追问：调用 AI 回答，追加到历史并持久化 */
+            window.wqSubmitQa = function () {
+                var input = document.getElementById("wqQaInput");
+                var box = document.getElementById("wqQaHistory");
+                if (!input || !box) return;
+                var q = input.value.trim();
+                if (!q) return;
+                input.value = "";
+                input.disabled = true;
+                /* 先显示用户问题 + 回答加载中 */
+                var tempId = "wqQaTemp_" + Date.now();
+                if (box.innerHTML.indexOf("暂无追问") >= 0) box.innerHTML = "";
+                box.innerHTML += '<div style="margin-bottom:8px">' +
+                    '<div style="background:#eef2ff;border-radius:8px;padding:8px 10px;font-size:13px;color:#1e293b"><b>Q:</b> ' + esc(q) + '</div>' +
+                    '<div id="' + tempId + '" style="background:#f8fafc;border-radius:8px;padding:8px 10px;font-size:13px;color:#6366f1;margin-top:4px"><b>A:</b> 思考中…</div>' +
+                    '</div>';
+                box.scrollTop = box.scrollHeight;
+                /* 取当前讲解内容作为上下文 */
+                var explainBox = document.getElementById("wqAiExplainBox");
+                var explainText = explainBox ? explainBox.textContent || "" : "";
+                var contextText = "原题：" + (_wqOrigText || origText || "") + "\n讲解：" + explainText.slice(0, 1500);
+                var messages = [
+                    { role: "system", content: "你是一位耐心的" + (sub || "全科") + "老师。学生对讲透原题的讲解有疑问，请用通俗易懂的方式解答。" +
+                        "如果学生问的是讲解中某一步，先回顾那一步再解释。数学公式用LaTeX。需要配图可用 [IMG:描述] 标记。回答要具体，不要空泛。" },
+                    { role: "user", content: contextText + "\n\n学生疑问：" + q }
+                ];
+                WQ_AI_ROUTER.call(messages, "pipeline", function (err, res) {
+                    var tempEl = document.getElementById(tempId);
+                    if (err) {
+                        if (tempEl) tempEl.innerHTML = '<b>A:</b> <span style="color:#991b1b">回答失败，请重试</span>';
+                    } else {
+                        var answer = (res && res.text) ? res.text.trim() : "暂无回答";
+                        if (tempEl) tempEl.innerHTML = '<b>A:</b> ' + renderDiagramMarkers(answer, sub);
+                        /* 持久化到 localStorage */
+                        var history = [];
+                        try { history = JSON.parse(localStorage.getItem(wqQaStorageKey()) || "[]"); } catch (e) {}
+                        history.push({ q: q, a: answer, ts: Date.now() });
+                        try { localStorage.setItem(wqQaStorageKey(), JSON.stringify(history.slice(-20))); } catch (e) {}
+                    }
+                    if (input) input.disabled = false;
+                    input.focus();
+                });
+            };
 
             /* 举一反三提示 —— 非标准题不展示错因/路径提示 */
             var tipEl = document.getElementById("wqTipBox");
@@ -10790,16 +10918,11 @@ var IndoorRouter = (function () {
             var q = quiz.questions[quiz.current];
             var total = quiz.questions.length;
             var subj = (quiz.subjects && quiz.subjects.length) ? quiz.subjects[0] : "";
-            /* 配图：AI标记 needImg 或 题干含"如图"等关键词时生成 */
+            /* 配图：AI标记 needImg 或 题干含"如图"等关键词时生成（带缓存+加载状态） */
             var imgHtml = "";
             if (q.needImg || needsDiagram(q.q)) {
                 var imgDesc = q.imgDesc || q.q.replace(/[。，；].*$/, "").slice(0, 60);
-                var imgUrl = generateDiagram(imgDesc, { subject: subj, width: 560, height: 380 });
-                imgHtml = '<div style="margin:10px 0;text-align:center">' +
-                    '<img src="' + imgUrl + '" alt="题目配图" style="max-width:100%;max-height:300px;border-radius:8px;border:1px solid #e2e8f0" ' +
-                    'onerror="this.style.display=\'none\';this.nextElementSibling.style.display=\'block\'" />' +
-                    '<div style="display:none;font-size:12px;color:#94a3b8;padding:8px">⚠ 配图加载失败，请参考题干描述</div>' +
-                    '</div>';
+                imgHtml = imgDiagramHTML(imgDesc, { subject: subj, width: 560, height: 380 });
             }
             var html = '<div style="margin-bottom:12px;font-size:13px;color:#64748b">第 ' + (quiz.current + 1) + ' / ' + total + ' 题</div>' +
                 '<div style="font-size:15px;font-weight:600;color:#1e293b;line-height:1.6;margin-bottom:8px">' + renderMath(q.q) + '</div>' +
