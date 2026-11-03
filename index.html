@@ -7740,13 +7740,13 @@ var IndoorRouter = (function () {
             if (node.mother) {
                 h += '<div class="wq-dev-qitem" onclick="wqDevEditQuestion(\'mother\',-1)" ' +
                     'style="padding:8px;border:1px solid #e5e7eb;border-radius:6px;margin-bottom:6px;cursor:pointer;background:#fef3c7">' +
-                    '<span style="color:#b45309;font-weight:bold">[母题]</span> ' + esc(node.mother.text) + '</div>';
+                    '<span style="color:#b45309;font-weight:bold">[母题]</span> ' + renderMath(decodeHtml(node.mother.text)) + '</div>';
             }
             var qs = node.questions || [];
             for (var i = 0; i < qs.length; i++) {
                 h += '<div class="wq-dev-qitem" onclick="wqDevEditQuestion(\'question\',' + i + ')" ' +
                     'style="padding:8px;border:1px solid #e5e7eb;border-radius:6px;margin-bottom:6px;cursor:pointer">' +
-                    '<span style="color:#6b7280;font-size:11px">L' + (qs[i].diff || 1) + '</span> ' + esc(qs[i].text) +
+                    '<span style="color:#6b7280;font-size:11px">L' + (qs[i].diff || 1) + '</span> ' + renderMath(decodeHtml(qs[i].text)) +
                     (qs[i].source ? ' <span style="color:#9ca3af;font-size:11px">[' + esc(qs[i].source) + ']</span>' : '') + '</div>';
             }
             list.innerHTML = h;
@@ -8289,11 +8289,46 @@ var IndoorRouter = (function () {
             return s;
         }
 
+        /* 自动包裹未加 $ 定界符的 LaTeX 数学表达式
+         * 策略：保护已有 $...$ / $$...$$，对其余文本中"连续非中文片段"
+         * 若含数学特征（_ ^ { } \ 或 \command）则整体包裹 $...$，交给 KaTeX 渲染。
+         * 例：S_n → $S_n$，a_1 = 1 → $a_1 = 1$，{a_n} → ${a_n}$ */
+        function autoWrapMath(text) {
+            var s = String(text == null ? "" : text);
+            /* ① 保护已有的 $...$ / $$...$$ / \[...\] / \(...\) */
+            var protectedParts = [];
+            s = s.replace(/\$\$[\s\S]+?\$\$|\\\[[\s\S]+?\\\]|\\\([\s\S]+?\\\)|\$[^$\n]+\$/g, function (m) {
+                protectedParts.push(m);
+                return "\x00MATH" + (protectedParts.length - 1) + "\x00";
+            });
+            /* ② 对连续非中文/非全角标点的片段，若含数学特征则包裹 $...$ */
+            s = s.replace(/[^\u4e00-\u9fff\u3000-\u303f\uff00-\uffef]+/g, function (run) {
+                var t = run;
+                /* 去掉首尾空白后判断 */
+                var trimmed = t.trim();
+                if (trimmed.length < 2) return t;
+                /* 含 _ ^ { } \ 或 \command 则视为数学 */
+                var hasMath = /[_^{}\\]|\\[a-zA-Z]/.test(trimmed);
+                if (!hasMath) return t;
+                /* 包裹：保留首尾空白 */
+                var lead = t.match(/^\s*/)[0];
+                var trail = t.match(/\s*$/)[0];
+                return lead + "$" + trimmed + "$" + trail;
+            });
+            /* ③ 还原保护的数学块 */
+            s = s.replace(/\x00MATH(\d+)\x00/g, function (_, i) {
+                return protectedParts[parseInt(i)];
+            });
+            return s;
+        }
+
         /* 数学公式渲染：识别 $...$ / $$...$$ / \(...\) / \[...\]，用 KaTeX 渲染
          * 非公式部分先 HTML 转义，再做轻量 Markdown 转换；公式部分用 katex.renderToString 输出 HTML */
         function renderMath(text) {
             var s = String(text == null ? "" : text);
             if (!window.katex) return mdInline(esc(s)); /* KaTeX 未加载时降级为纯文本+Markdown */
+            /* 自动包裹未加 $ 的 LaTeX 表达式（题库题目常缺定界符） */
+            s = autoWrapMath(s);
             /* 按公式分隔符切分：$$...$$ 优先，再 $...$，再 \( \) \[ \] */
             var parts = [];
             var regex = /(\$\$[\s\S]+?\$\$|\\\[[\s\S]+?\\\]|\\\([\s\S]+?\\\)|\$[^$\n]+\$)/g;
@@ -9300,7 +9335,7 @@ var IndoorRouter = (function () {
                     var dh = '<div class="wq-deep-card">' +
                         '<div class="wq-deep-head"><span class="wq-deep-badge">🎯 讲透这道题</span>' +
                         '<span class="wq-deep-diff">' + wqDiffBar(origDiff) + '</span></div>' +
-                        '<div class="wq-deep-q">' + esc(origText) + '</div>' +
+                        '<div class="wq-deep-q">' + renderMath(decodeHtml(origText)) + '</div>' +
                         '<div class="wq-deep-sections">' +
                             '<div class="wq-deep-sec"><b>考点：</b>' + kpStr + (featStr ? ' <b style="margin-left:10px">题型：</b>' + featStr : '') + '</div>';
 
@@ -10085,7 +10120,7 @@ var IndoorRouter = (function () {
             } else {
                 box.innerHTML = filtered.map(function (r) {
                     var thumb = r.img ? '<img class="wq-item-thumb" src="' + r.img + '" alt="错题图">' : "";
-                    var txt = r.text ? esc(r.text) : "（仅图片）";
+                    var txt = r.text ? renderMath(decodeHtml(r.text)) : "（仅图片）";
                     var kpsHtml = (r.kps && r.kps.length) ? r.kps.slice(0, 3).map(function (k) { return '<span class="wq-kp-tag small">' + esc(k) + '</span>'; }).join("") : "";
                     var diffHtml = r.diff ? wqDiffBar(r.diff) : "";
                     var errObj = WQ_ERROR_TYPES.filter(function (t) { return t.id === r.error; })[0];
@@ -10238,7 +10273,7 @@ var IndoorRouter = (function () {
                     '<span class="wq-kp-tag small" style="font-size:12px">' + esc(q.kp) + '</span>' + diff +
                     '<span style="font-size:11px;color:#94a3b8">' + esc(q.source) + '</span>' +
                     '<span class="bank-view-hint" style="font-size:11px;color:#8b5cf6;margin-left:auto">▼ 点击查看详情</span></div>' +
-                    '<div style="font-size:16px;color:#1e293b;line-height:1.7;font-weight:500;word-break:break-word;overflow-wrap:break-word;display:block">' + esc(q.text) + '</div>' +
+                    '<div style="font-size:16px;color:#1e293b;line-height:1.7;font-weight:500;word-break:break-word;overflow-wrap:break-word;display:block">' + renderMath(decodeHtml(q.text)) + '</div>' +
                     '<div id="' + cardId + '_detail" style="display:none;margin-top:10px;padding-top:10px;border-top:1px dashed #e2e8f0">' +
                     (q.answer ? '<div style="font-size:14px;color:#166534;margin-bottom:8px;display:block"><b style="color:#065f46">✅ 答案：</b>' + renderMath(decodeHtml(q.answer)) + '</div>' : '') +
                     (q.solution ? '<div style="font-size:13px;color:#475569;line-height:1.7;display:block"><b style="color:#334155">📖 解析：</b>' + renderMath(decodeHtml(q.solution)) + '</div>' : '') +
