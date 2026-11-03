@@ -7338,7 +7338,7 @@ var IndoorRouter = (function () {
                 "7=综合建模(建立模型+多知识点融合)，8=思想方法(分类讨论/数形结合/构造等高级思想)，" +
                 "9=拓展探究(竞赛级/需构造/非常规解法)，10=原创研究(科研级/开放性/无固定解法)。" +
                 "【严格上限】常规求导/零点/参数范围/单调性/极值题≤8；只有竞赛题、需构造辅助函数、证明复杂不等式、组合计数等才给9；只有科研级开放题才给10。知识点要精准，2-4个。" +
-                (imgDataUrl ? "若图片模糊不清无法识别题目，请返回 {\"blur\":true} 并建议重拍。" : "") +
+                "【重要】返回的 JSON 中必须包含 \"text\" 字段：若有图片，text 为从图片中提取的完整题目原文（不要只写用户输入的指令）；若无图片，text 为用户输入的题目原文。" +
                 "\n【多题检测（灵活判断）】仅当内容中存在多道彼此独立、各自有完整题干和答案的题目时才拆分。" +
                 "判断原则：① 对话/聊天记录/连续段落/阅读理解（含多个小问但共享同一材料）→ 视为【一道题】，不要拆分；" +
                 "② 只有出现明显题号（1. 2. 3. 或 (1)(2)(3) 或 一、二、三）且每道题题干完整、彼此无依赖时才拆分为多题；" +
@@ -7839,6 +7839,7 @@ var IndoorRouter = (function () {
         var _wqQtype = null;
         var _wqKps = [];          // 当前识别到的知识点数组
         var _wqDiff = 0;          // 当前题目难度估计
+        var _wqOrigText = "";     // 题目原文（有图片时取 AI 提取的内容，无图片时取文本框）
         var _wqAiTimer = null;
         var _wqOcrWorker = null;
         var _wqMultiQuestions = null;  // AI识别出的多题列表
@@ -8244,11 +8245,30 @@ var IndoorRouter = (function () {
             return "••••••••" + k.slice(-4);
         }
 
+        /* 轻量 Markdown 转换（作用于已 HTML 转义的文本，井号/星号/连字符不受转义影响）
+         * 支持：# 标题、**加粗**、-/* 无序列表、1. 有序列表 */
+        function mdInline(s) {
+            /* 标题：# → h1, ## → h2, ... ###### → h6 */
+            s = s.replace(/^######\s+(.+)$/gm, '<h6 style="font-size:13px;margin:8px 0 4px;color:#4338ca;font-weight:700">$1</h6>');
+            s = s.replace(/^#####\s+(.+)$/gm, '<h5 style="font-size:14px;margin:8px 0 4px;color:#4338ca;font-weight:700">$1</h5>');
+            s = s.replace(/^####\s+(.+)$/gm, '<h4 style="font-size:15px;margin:9px 0 4px;color:#4338ca;font-weight:700">$1</h4>');
+            s = s.replace(/^###\s+(.+)$/gm, '<h3 style="font-size:16px;margin:9px 0 5px;color:#4338ca;font-weight:700">$1</h3>');
+            s = s.replace(/^##\s+(.+)$/gm, '<h2 style="font-size:17px;margin:10px 0 5px;color:#4338ca;font-weight:700">$1</h2>');
+            s = s.replace(/^#\s+(.+)$/gm, '<h1 style="font-size:18px;margin:10px 0 5px;color:#4338ca;font-weight:700">$1</h1>');
+            /* 加粗 **text** */
+            s = s.replace(/\*\*(.+?)\*\*/g, '<b>$1</b>');
+            /* 无序列表 - / * */
+            s = s.replace(/^[-*]\s+(.+)$/gm, '<li style="margin-left:18px;list-style:disc">$1</li>');
+            /* 有序列表 1. 2. */
+            s = s.replace(/^\d+\.\s+(.+)$/gm, '<li style="margin-left:18px;list-style:decimal">$1</li>');
+            return s;
+        }
+
         /* 数学公式渲染：识别 $...$ / $$...$$ / \(...\) / \[...\]，用 KaTeX 渲染
-         * 非公式部分先 HTML 转义，公式部分用 katex.renderToString 输出 HTML */
+         * 非公式部分先 HTML 转义，再做轻量 Markdown 转换；公式部分用 katex.renderToString 输出 HTML */
         function renderMath(text) {
             var s = String(text == null ? "" : text);
-            if (!window.katex) return esc(s); /* KaTeX 未加载时降级为纯文本 */
+            if (!window.katex) return mdInline(esc(s)); /* KaTeX 未加载时降级为纯文本+Markdown */
             /* 按公式分隔符切分：$$...$$ 优先，再 $...$，再 \( \) \[ \] */
             var parts = [];
             var regex = /(\$\$[\s\S]+?\$\$|\\\[[\s\S]+?\\\]|\\\([\s\S]+?\\\)|\$[^$\n]+\$)/g;
@@ -8263,7 +8283,7 @@ var IndoorRouter = (function () {
             var html = "";
             for (var i = 0; i < parts.length; i++) {
                 if (parts[i].type === "text") {
-                    html += esc(parts[i].val);
+                    html += mdInline(esc(parts[i].val));
                 } else {
                     var raw = parts[i].val;
                     var display = /^\$\$|^\\\[/.test(raw);
@@ -8586,25 +8606,22 @@ var IndoorRouter = (function () {
                 }
                 if (err) {
                     /* AI 失败 → 规则兜底 */
+                    _wqOrigText = text;
                     _wqSubject = detectSubject(text);
                     _wqQtype = detectQType(text);
                     _wqKps = detectKnowledgePoints(text, _wqSubject);
                     _wqDiff = estimateDifficulty(text);
                     _wqError = detectErrorCause(text, _wqQtype, _wqDiff);
-                } else if (aiResult.blur) {
-                    if (aiBtn) { aiBtn.disabled = false; aiBtn.textContent = "🔍 分析题目"; }
-                    showToast("⚠ 图片模糊不清，无法识别题目，请重新拍摄清晰图片");
-                    var ocrTip = document.getElementById("wqOcrTip");
-                    if (ocrTip) ocrTip.innerHTML = "⚠ 图片模糊，请重新拍摄更清晰的图片";
-                    return;
                 } else {
+                    /* 有图片时优先用 AI 提取的题目原文，避免把用户指令（如"分析对话"）当成题目 */
+                    _wqOrigText = (_wqImg && aiResult.text) ? aiResult.text : text;
                     _wqSubject = aiResult.subject;
                     _wqQtype = aiResult.qtype;
                     _wqKps = aiResult.kps;
                     _wqDiff = aiResult.diff;
-                    _wqError = aiResult.errorCause || detectErrorCause(text, _wqQtype, _wqDiff);
+                    _wqError = aiResult.errorCause || detectErrorCause(_wqOrigText, _wqQtype, _wqDiff);
                 }
-                _wqCritique = critiqueQuestion(text, _wqQtype);
+                _wqCritique = critiqueQuestion(_wqOrigText, _wqQtype);
                 _wqMastery = {};
                 /* 单题模式隐藏多题返回按钮 */
                 var _backBtn = document.getElementById("wqBackToList");
@@ -9156,7 +9173,7 @@ var IndoorRouter = (function () {
             var sub = _wqSubject || "其他";
             var subBank = WQ_BANK[sub];
             var recs = [], matchedKp = (_wqKps && _wqKps[0]) || null;
-            var origText = (document.getElementById("wqText") || {}).value || "";
+            var origText = _wqOrigText || (document.getElementById("wqText") || {}).value || "";
             var origDiff = _wqDiff || 4;
 
             /* 非标准题检测：学科="其他"或无知识点 → 不硬套学术框架，不推荐无关题 */
@@ -9652,7 +9669,7 @@ var IndoorRouter = (function () {
             var t = (q.text || "").trim();
             if (t.length >= 10 && t.length <= 500) score += 0.15;
             /* 非雷同（0.15）：与原题相似度适中 */
-            var orig = (document.getElementById("wqText") || {}).value || "";
+            var orig = _wqOrigText || (document.getElementById("wqText") || {}).value || "";
             var sim = textSim(orig, t);
             if (sim > 0.1 && sim < 0.7) score += 0.15;
             return Math.min(1, score);
@@ -9749,6 +9766,8 @@ var IndoorRouter = (function () {
         function saveWQItem() {
             var text = (document.getElementById("wqText") || {}).value || "";
             if (!text.trim() && !_wqImg) { showToast("请上传错题图片或输入题目内容"); return; }
+            /* 保存的题目原文：有图片时取 AI 提取的内容，避免把"分析对话"等指令存成题目 */
+            var savedText = (_wqOrigText || text).trim();
             /* 保存前：捕获当前完整分析（讲解/母题/推荐），便于错题本再次查看时恢复 */
             captureWQAnalysis();
             /* 保存前：将用户标记的好题按权重入库（未评价的题不计入用户权重） */
@@ -9757,9 +9776,9 @@ var IndoorRouter = (function () {
             list.unshift({
                 id: Date.now(),
                 img: _wqImg,
-                text: text.trim(),
-                subject: _wqSubject || detectSubject(text),
-                qtype: _wqQtype || detectQType(text),
+                text: savedText,
+                subject: _wqSubject || detectSubject(savedText),
+                qtype: _wqQtype || detectQType(savedText),
                 kps: _wqKps,
                 diff: _wqDiff,
                 error: _wqError,
@@ -9888,7 +9907,7 @@ var IndoorRouter = (function () {
             }
 
             /* ③ 原题自动入库：质量+难度双达标才收入题库 */
-            var origText = (document.getElementById("wqText") || {}).value || "";
+            var origText = _wqOrigText || (document.getElementById("wqText") || {}).value || "";
             if (origText.trim()) {
                 var origQ = { text: origText.trim(), diff: _wqDiff || 5, kp: _wqKps, answer: "", solution: "", source: "用户错题" };
                 if ((parseInt(origQ.diff) || 0) >= minDiff) {
