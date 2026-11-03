@@ -90,9 +90,13 @@ export async function onRequestPost(context) {
     if (!bank[subject][kp]) bank[subject][kp] = { questions: [] };
     var node = bank[subject][kp];
     node.questions = node.questions || [];
-    for (var i = 0; i < node.questions.length; i++) {
-      if (textSim(text, node.questions[i].text) > 0.4) {
-        return json({ ok: false, reason: "duplicate", msg: "题库中已有相似题目" });
+    /* 跨知识点去重：扫描相同学科下所有知识点的题，避免同题因 KP 不同重复入库 */
+    for (var dk in (bank[subject] || {})) {
+      var dn = bank[subject][dk];
+      for (var di = 0; di < (dn.questions || []).length; di++) {
+        if (textSim(text, dn.questions[di].text) > 0.4) {
+          return json({ ok: false, reason: "duplicate", msg: "题库中已有相似题目" });
+        }
       }
     }
     /* 入库 */

@@ -6522,8 +6522,14 @@ var IndoorRouter = (function () {
                 if (!WQ_BANK[sub][targetKp]) WQ_BANK[sub][targetKp] = { mother: null, variants: [], questions: [] };
                 var node = WQ_BANK[sub][targetKp];
                 node.questions = node.questions || [];
-                /* 去重：与已有题（含母题、变式）相似度 > 阈值则跳过 */
-                var existing = (node.questions || []).concat([node.mother]).concat(node.variants || []).filter(Boolean);
+                /* 去重：扫描相同学科下【所有知识点】的题（含母题、变式），
+                 * 避免同一道题因 KP 分类不同而重复入库 */
+                var existing = [];
+                for (var k in WQ_BANK[sub]) {
+                    var n = WQ_BANK[sub][k];
+                    existing = existing.concat(n.questions || []).concat([n.mother]).concat(n.variants || []);
+                }
+                existing = existing.filter(Boolean);
                 for (var i = 0; i < existing.length; i++) {
                     if (textSim(q.text, existing[i].text) > self.config.dedupSimThreshold) return false;
                 }
@@ -6608,13 +6614,20 @@ var IndoorRouter = (function () {
                             node.questions = node.questions || [];
                             var extQs = extra[sub][kp].questions || [];
                             for (var i = 0; i < extQs.length; i++) {
-                                /* 精英化：不加载低难度扩展题 */
-                                if ((parseInt(extQs[i].diff) || 0) < minDiff) { skipped++; continue; }
+                                /* 用户/AI 贡献的题（有 source）即使被历史 recalibration 误降难度也强制加载并恢复门槛难度 */
+                                var isContributed = !!extQs[i].source;
+                                if (!isContributed && (parseInt(extQs[i].diff) || 0) < minDiff) { skipped++; continue; }
+                                if (isContributed && (parseInt(extQs[i].diff) || 0) < minDiff) { extQs[i].diff = minDiff; }
                                 /* 跳过被管理员删除的题（黑名单） */
                                 if (self.isDeleted(extQs[i].text)) { skipped++; continue; }
                                 var dup = false;
-                                for (var j = 0; j < node.questions.length; j++) {
-                                    if (textSim(extQs[i].text, node.questions[j].text) > self.config.dedupSimThreshold) { dup = true; break; }
+                                /* 跨知识点去重：扫描相同学科下所有已加载的题 */
+                                for (var dk in WQ_BANK[sub]) {
+                                    var dn = WQ_BANK[sub][dk];
+                                    for (var dj = 0; dj < (dn.questions || []).length; dj++) {
+                                        if (textSim(extQs[i].text, dn.questions[dj].text) > self.config.dedupSimThreshold) { dup = true; break; }
+                                    }
+                                    if (dup) break;
                                 }
                                 if (!dup) { node.questions.push(extQs[i]); cnt++; }
                             }
@@ -6635,9 +6648,13 @@ var IndoorRouter = (function () {
                         var node = WQ_BANK[sub][kp];
                         var before = (node.questions || []).length;
                         node.questions = (node.questions || []).filter(function (q) {
-                            /* 同时清理低难度题和已被管理员删除（黑名单）的题 */
-                            if ((parseInt(q.diff) || 0) < minDiff) return false;
+                            /* 被管理员主动删除（黑名单）的题，无论是否有 source 都清除 */
                             if (self.isDeleted(q.text)) return false;
+                            /* 用户/AI 贡献的题（有 source）受保护：不被精英化清理删除。
+                             * 这些题是用户主动标记或 AI 推荐入库的，难度已通过入库校验，不应被规则估计器误判后清除 */
+                            if (q.source) return true;
+                            /* 内置题：清理低难度题 */
+                            if ((parseInt(q.diff) || 0) < minDiff) return false;
                             return true;
                         });
                         removed += before - node.questions.length;
@@ -6669,6 +6686,9 @@ var IndoorRouter = (function () {
                             /* AI 来源的题（含 answer/solution）若规则评分偏低，允许保留但不超过 8 */
                             var hasFull = (q.answer && q.answer.length > 2) || (q.solution && q.solution.length > 10);
                             if (hasFull && newDiff < ruleDiff) newDiff = Math.min(8, ruleDiff);
+                            /* 用户/AI 贡献的题（有 source）：绝不降低难度，避免被 purge 误删。
+                             * 规则估计器对语文/英语等非数理化题常误判偏低，用户已标记为好题则应保留原难度 */
+                            if (q.source && newDiff < oldDiff) newDiff = oldDiff;
                             if (newDiff !== oldDiff) {
                                 q.diff = newDiff;
                                 changed++;
@@ -6826,13 +6846,18 @@ var IndoorRouter = (function () {
                                 node.questions = node.questions || [];
                                 var extQs = (shared[sub][kp].questions || []);
                                 for (var i = 0; i < extQs.length; i++) {
-                                    /* 精英化：共享题库也只收难度 ≥ bankMinDiff 的题 */
-                                    if ((parseInt(extQs[i].diff) || 0) < (WQ_AI_CONFIG.bankMinDiff || 7)) continue;
+                                    /* 共享题库题均为用户贡献（有 source），不按本地难度阈值过滤，全部同步 */
+                                    if ((parseInt(extQs[i].diff) || 0) < (WQ_AI_CONFIG.bankMinDiff || 7) && !extQs[i].source) continue;
                                     /* 跳过被管理员删除的题（黑名单），防止重新同步回来 */
                                     if (WQ_PIPELINE_B.isDeleted(extQs[i].text)) continue;
                                     var dup = false;
-                                    for (var j = 0; j < node.questions.length; j++) {
-                                        if (textSim(extQs[i].text, node.questions[j].text) > WQ_PIPELINE_B.config.dedupSimThreshold) { dup = true; break; }
+                                    /* 跨知识点去重：扫描相同学科下所有已加载的题 */
+                                    for (var sk in WQ_BANK[sub]) {
+                                        var sn = WQ_BANK[sub][sk];
+                                        for (var sj = 0; sj < (sn.questions || []).length; sj++) {
+                                            if (textSim(extQs[i].text, sn.questions[sj].text) > WQ_PIPELINE_B.config.dedupSimThreshold) { dup = true; break; }
+                                        }
+                                        if (dup) break;
                                     }
                                     if (!dup) { node.questions.push(extQs[i]); added++; }
                                 }
@@ -9881,27 +9906,39 @@ var IndoorRouter = (function () {
                 }
             }
 
-            /* ② 用户标记👍的题：加权评分（规则*0.6 + 用户*0.4） */
+            /* ② 用户标记👍的题：加权评分（规则*0.6 + 用户*0.4），用 extractQFromCard 取完整数据（含答案） */
             if (_wqMastery && Object.keys(_wqMastery).length) {
                 for (var idx in _wqMastery) {
                     if (!_wqMastery[idx]) continue;
-                    var targetQ = null;
+                    var targetCard = null;
                     for (var j = 0; j < recEls.length; j++) {
                         var btn = recEls[j].querySelector('.wq-mastery-btn.ok');
                         if (btn && btn.getAttribute("onclick") && btn.getAttribute("onclick").indexOf(idx) >= 0) {
-                            var qText = recEls[j].querySelector(".wq-rec-q").textContent || "";
-                            targetQ = { text: qText.trim(), diff: 5, kp: _wqKps, answer: "", solution: "", source: "用户推荐" };
+                            targetCard = recEls[j];
                             break;
                         }
                     }
+                    if (!targetCard) continue;
+                    var targetQ = extractQFromCard(targetCard);
                     if (!targetQ) continue;
+                    targetQ.source = "用户推荐";
                     if ((parseInt(targetQ.diff) || 0) < minDiff) continue;  /* 难度不达标跳过 */
                     var uRuleScore = calcQuestionQuality(targetQ);
                     var finalScore = uRuleScore * w.program + 1 * w.user;
                     if (finalScore >= minQ) {
                         targetQ.diff = targetQ.diff || 5;
-                        targetQ.kp = _wqKps;
-                        if (WQ_PIPELINE_B.storeQuestion(targetQ, sub, kp)) userStored++;
+                        targetQ.kp = targetQ.kp && targetQ.kp.length ? targetQ.kp : (_wqKps || []);
+                        if (WQ_PIPELINE_B.storeQuestion(targetQ, sub, kp)) {
+                            userStored++;
+                            /* 有答案则同步上传共享题库，对所有用户可见 */
+                            if (targetQ.answer && targetQ.answer.trim()) {
+                                uploadQuestionToSharedBank({
+                                    text: targetQ.text, answer: targetQ.answer, idea: targetQ.idea,
+                                    solution: targetQ.solution, pitfall: targetQ.pitfall, diff: targetQ.diff,
+                                    kp: targetQ.kp, subject: sub
+                                }, finalScore, function () {});
+                            }
+                        }
                     }
                 }
             }
@@ -9916,6 +9953,21 @@ var IndoorRouter = (function () {
                         origQ.source = "用户错题(权重" + origScore.toFixed(2) + ")";
                         if (WQ_PIPELINE_B.storeQuestion(origQ, sub, kp)) autoStored++;
                     }
+                }
+            }
+
+            /* ① 补：AI 推荐题入库后也上传共享题库（有答案的） */
+            for (var ai = 0; ai < recEls.length; ai++) {
+                var aq = extractQFromCard(recEls[ai]);
+                if (!aq) continue;
+                if ((parseInt(aq.diff) || 0) < minDiff) continue;
+                var aScore = calcQuestionQuality(aq);
+                if (aScore >= minQ && aq.answer && aq.answer.trim()) {
+                    uploadQuestionToSharedBank({
+                        text: aq.text, answer: aq.answer, idea: aq.idea,
+                        solution: aq.solution, pitfall: aq.pitfall, diff: aq.diff,
+                        kp: aq.kp, subject: sub
+                    }, aScore, function () {});
                 }
             }
 
@@ -10387,6 +10439,18 @@ var IndoorRouter = (function () {
                             if (btn) { btn.disabled = false; }
                             if (ok) {
                                 if (btn) btn.textContent = "✅ 已上传";
+                                /* 同时存入本地题库，立即可见（无需等下次同步） */
+                                try {
+                                    var localQ = {
+                                        text: targetQ.text, answer: targetQ.answer, idea: targetQ.idea,
+                                        solution: targetQ.solution, diff: targetQ.diff, kp: targetQ.kp,
+                                        source: "用户贡献(共享)", subject: targetQ.subject
+                                    };
+                                    var lSub = targetQ.subject || "其他";
+                                    var lKp = (targetQ.kp && targetQ.kp.length) ? targetQ.kp[0] : "综合运用";
+                                    WQ_PIPELINE_B.storeQuestion(localQ, lSub, lKp);
+                                    WQ_PIPELINE_B.persistBank();
+                                } catch (e) {}
                                 showToast("⭐ 检验通过（综合" + finalScore.toFixed(2) + "），已上传共享题库！所有用户可见");
                             } else {
                                 if (btn) btn.textContent = "⭐ 检验好题";
