@@ -1455,7 +1455,8 @@ body.no-motion .layer-base.plan-loading::after { animation: none; }
 }
 .fb-item:hover { transform: translateY(-2px); box-shadow: 0 8px 24px rgba(99,102,241,.12); border-color: #c7d2fe; }
 /* 题库列表移动端优化：移除 300ms 点击延迟，防止文字误选 */
-#wqBankItems .fb-item { touch-action: manipulation; -webkit-tap-highlight-color: rgba(99,102,241,.08); }
+#wqBankItems { overflow-y: auto; -webkit-overflow-scrolling: touch; }
+#wqBankItems .fb-item { touch-action: manipulation; -webkit-tap-highlight-color: rgba(99,102,241,.08); overflow: visible; }
 #wqBankItems [data-bankview] { -webkit-user-select: none; user-select: none; }
 .fb-item-head { display: flex; justify-content: space-between; margin-bottom: 4px; }
 .fb-item-type { font-weight: 600; color: #1d4ed8; }
@@ -6664,6 +6665,8 @@ var IndoorRouter = (function () {
                             all.push({
                                 subject: sub, kp: kp,
                                 text: qs[i].text, answer: qs[i].answer,
+                                solution: qs[i].solution || "", idea: qs[i].idea || "",
+                                pitfall: qs[i].pitfall || "", method: qs[i].method || "",
                                 diff: qs[i].diff, source: qs[i].source || "内置",
                                 added_at: qs[i].added_at || ""
                             });
@@ -9885,32 +9888,29 @@ var IndoorRouter = (function () {
             box.innerHTML = list.map(function (q, idx) {
                 var diff = q.diff ? wqDiffBar(q.diff) : "";
                 var cardId = "bankq_" + idx;
-                return '<div class="fb-item" style="padding:14px">' +
-                    '<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:10px">' +
-                    '<div style="flex:1;min-width:0;cursor:pointer" data-bankview="' + idx + '">' +
-                    '<div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-bottom:8px">' +
+                return '<div class="fb-item" style="padding:14px 14px 14px 18px;overflow:visible">' +
+                    '<div style="position:relative">' +
+                    '<div style="cursor:pointer;display:block;width:100%" data-bankview="' + idx + '">' +
+                    '<div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin-bottom:8px;padding-right:70px">' +
                     '<span class="wq-item-subject" style="font-size:12px;padding:3px 10px">' + esc(q.subject) + '</span>' +
                     '<span class="wq-kp-tag small" style="font-size:12px">' + esc(q.kp) + '</span>' + diff +
                     '<span style="font-size:11px;color:#94a3b8">' + esc(q.source) + '</span>' +
                     '<span class="bank-view-hint" style="font-size:11px;color:#8b5cf6;margin-left:auto">▼ 点击查看详情</span></div>' +
-                    '<div style="font-size:16px;color:#1e293b;line-height:1.7;font-weight:500;word-break:break-word">' + esc(q.text) + '</div>' +
+                    '<div style="font-size:16px;color:#1e293b;line-height:1.7;font-weight:500;word-break:break-word;overflow-wrap:break-word;display:block">' + esc(q.text) + '</div>' +
                     '<div id="' + cardId + '_detail" style="display:none;margin-top:10px;padding-top:10px;border-top:1px dashed #e2e8f0">' +
-                    (q.answer ? '<div style="font-size:14px;color:#166534;margin-bottom:8px"><b style="color:#065f46">✅ 答案：</b>' + renderMath(esc(q.answer)) + '</div>' : '') +
-                    (q.solution ? '<div style="font-size:13px;color:#475569;line-height:1.7"><b style="color:#334155">📖 解析：</b>' + renderMath(esc(q.solution)) + '</div>' : '') +
-                    (q.idea ? '<div style="font-size:13px;color:#7c3aed;line-height:1.7;margin-top:6px"><b>💡 思路：</b>' + renderMath(esc(q.idea)) + '</div>' : '') +
-                    (q.pitfall ? '<div style="font-size:13px;color:#dc2626;line-height:1.7;margin-top:6px"><b>⚠ 易错点：</b>' + renderMath(esc(q.pitfall)) + '</div>' : '') +
+                    (q.answer ? '<div style="font-size:14px;color:#166534;margin-bottom:8px;display:block"><b style="color:#065f46">✅ 答案：</b>' + renderMath(esc(q.answer)) + '</div>' : '') +
+                    (q.solution ? '<div style="font-size:13px;color:#475569;line-height:1.7;display:block"><b style="color:#334155">📖 解析：</b>' + renderMath(esc(q.solution)) + '</div>' : '') +
+                    (q.idea ? '<div style="font-size:13px;color:#7c3aed;line-height:1.7;margin-top:6px;display:block"><b>💡 思路：</b>' + renderMath(esc(q.idea)) + '</div>' : '') +
+                    (q.pitfall ? '<div style="font-size:13px;color:#dc2626;line-height:1.7;margin-top:6px;display:block"><b>⚠ 易错点：</b>' + renderMath(esc(q.pitfall)) + '</div>' : '') +
                     '</div>' +
                     '</div>' +
-                    (admin ? '<button class="wq-del" data-bankdel="' + encodeURIComponent(q.subject) + '||' + encodeURIComponent(q.kp) + '||' + encodeURIComponent(q.text) + '" style="flex-shrink:0;padding:6px 10px;font-size:13px">🗑 删除</button>' : '') +
+                    (admin ? '<button class="wq-del" data-bankdel="' + encodeURIComponent(q.subject) + '||' + encodeURIComponent(q.kp) + '||' + encodeURIComponent(q.text) + '" style="position:absolute;top:0;right:0;padding:6px 10px;font-size:13px">🗑 删除</button>' : '') +
                     '</div></div>';
             }).join("");
             /* 事件委托：点击题干区域展开/收起详情，点击删除按钮删除（互不干扰）
-             * 同时绑定 click 和 touchend，兼容移动端触摸；用时间戳防重复触发 */
-            var lastTap = 0;
-            function handleBankTap(e) {
-                var now = Date.now();
-                if (now - lastTap < 300) return;  /* 防抖：避免 click+touchend 双触发 */
-                lastTap = now;
+             * 用 click + touch-action:manipulation 消除移动端 300ms 延迟；
+             * 不额外绑定 touchend，避免与 click 双触发导致展开后又收起 */
+            box.onclick = function (e) {
                 var target = e.target;
                 var delBtn = target.closest ? target.closest("[data-bankdel]") : null;
                 if (delBtn) {
@@ -9935,16 +9935,7 @@ var IndoorRouter = (function () {
                         if (hint) hint.textContent = willShow ? "▲ 收起详情" : "▼ 点击查看详情";
                     }
                 }
-            }
-            box.onclick = handleBankTap;
-            box.addEventListener("touchend", function (e) {
-                /* touchend 时取 changedTouches 的 target */
-                var t = e.changedTouches && e.changedTouches[0];
-                if (t) {
-                    var el = document.elementFromPoint(t.clientX, t.clientY);
-                    if (el) handleBankTap({ target: el });
-                }
-            }, { passive: true });
+            };
         }
 
         /* ================================================================
