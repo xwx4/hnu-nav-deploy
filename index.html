@@ -7618,6 +7618,26 @@ var IndoorRouter = (function () {
             /* 时敏问题（近期事件/明星/体育/游戏版本）→ 路由到知识更新更快的模型 */
             var taskType = (hasSearch || _wqTimeSensitive) ? "current" : "pipeline";
 
+            /* 分段标记正则：兼容半角#/全角＃、半角空格/全角空格 */
+            var MARK = /[#＃]{2}[\s\u3000]*(讲解|母题|推荐|END)[\s\u3000]*[#＃]{2}/g;
+            function findMark(text, name) {
+                var re = new RegExp("[#＃]{2}[\\s\\u3000]*" + name + "[\\s\\u3000]*[#＃]{2}");
+                var mm = re.exec(text);
+                return mm ? mm.index : -1;
+            }
+            /* 剥除分段标记 + 清理残留标题行 + 安全截断（讲解区不应出现题干/JSON） */
+            function stripMarks(text) {
+                var s = String(text).replace(MARK, "");
+                s = s.replace(/^[#＃]+\s*(讲解|母题|推荐|END)\s*[#＃]*\s*$/gm, "");
+                var cutIdx = -1;
+                var m1 = /^题干[:：]/m.exec(s);
+                var m2 = /\[\{/.exec(s);
+                if (m1) cutIdx = m1.index;
+                if (m2 && (cutIdx < 0 || m2.index < cutIdx)) cutIdx = m2.index;
+                if (cutIdx >= 0) s = s.slice(0, cutIdx);
+                return s.trim();
+            }
+
             var acc = "";
             var stage = "explain"; /* explain -> mother -> recs -> done */
             var explainDone = false, motherDone = false, recsDone = false;
@@ -7627,10 +7647,11 @@ var IndoorRouter = (function () {
                 acc = full;
                 /* 实时解析分段标记，逐段渲染 */
                 if (stage === "explain") {
-                    var mIdx = acc.indexOf("##母题##");
+                    var mIdx = findMark(acc, "母题");
                     if (mIdx >= 0) {
                         /* 讲解段结束 */
-                        var exp = acc.slice(acc.indexOf("##讲解##") + 5, mIdx).trim();
+                        var sIdx = findMark(acc, "讲解");
+                        var exp = stripMarks(acc.slice(sIdx >= 0 ? sIdx + 5 : 0, mIdx));
                         if (cbs.onExplain) cbs.onExplain(exp);
                         explainDone = true;
                         stage = "mother";
@@ -7654,9 +7675,9 @@ var IndoorRouter = (function () {
                         /* 继续解析母题段 */
                         parseMotherAndRecs();
                     } else {
-                        /* 讲解仍在流式输出，实时渲染 */
-                        var startExp = acc.indexOf("##讲解##");
-                        var expPart = startExp >= 0 ? acc.slice(startExp + 5) : acc;
+                        /* 讲解仍在流式输出，实时渲染（剥除标记防泄漏） */
+                        var sIdx2 = findMark(acc, "讲解");
+                        var expPart = stripMarks(sIdx2 >= 0 ? acc.slice(sIdx2 + 5) : acc);
                         if (cbs.onExplain) cbs.onExplain(expPart);
                     }
                 } else if (stage === "mother" || stage === "recs") {
@@ -7666,11 +7687,11 @@ var IndoorRouter = (function () {
                 if (err) { if (cbs.onDone) cbs.onDone(err); return; }
                 /* 流结束，最终解析 */
                 if (!explainDone) {
-                    var s = acc.indexOf("##讲解##");
-                    var e = acc.indexOf("##母题##");
+                    var s = findMark(acc, "讲解");
+                    var e = findMark(acc, "母题");
                     if (s >= 0) {
-                        var exp2 = (e > s) ? acc.slice(s + 5, e) : acc.slice(s + 5);
-                        if (cbs.onExplain) cbs.onExplain(exp2.trim());
+                        var exp2 = stripMarks((e > s) ? acc.slice(s + 5, e) : acc.slice(s + 5));
+                        if (cbs.onExplain) cbs.onExplain(exp2);
                     }
                 }
                 parseMotherAndRecs(true);
@@ -7678,9 +7699,9 @@ var IndoorRouter = (function () {
             });
 
             function parseMotherAndRecs(final) {
-                var mStart = acc.indexOf("##母题##");
-                var rStart = acc.indexOf("##推荐##");
-                var endMark = acc.indexOf("##END##");
+                var mStart = findMark(acc, "母题");
+                var rStart = findMark(acc, "推荐");
+                var endMark = findMark(acc, "END");
                 if (mStart < 0) return;
 
                 if (!motherDone && rStart > mStart) {
@@ -8417,14 +8438,65 @@ var IndoorRouter = (function () {
             return "••••••••" + k.slice(-4);
         }
 
-        /* 题目配图生成：确定性种子保证同一题目生成同一图（可被浏览器缓存，重复访问秒级加载）
-         * 配合 imgDiagramHTML 使用：首次显示加载占位，加载成功后缓存到 localStorage，后续秒级显示
-         * @param {string} desc - 图片描述
-         * @param {object} opts - { width, height, subject }
-         * @returns {string} 图片 URL
-         */
+        /* ===== 配图生成：错误图检测 + 速率限制 + 缓存 ===== */
+        /* 全局速率限制：Pollinations 免费层约 1 图/60秒，客户端排队避免触发限制 */
+        var _pollLastReq = 0;
+        var _pollQueue = [];
+        var _pollTimer = null;
+        var POLL_MIN_INTERVAL = 62000; /* 毫秒，略大于 60s 留余量 */
+        function pollSchedule(fn) {
+            var now = Date.now();
+            var wait = Math.max(0, POLL_MIN_INTERVAL - (now - _pollLastReq));
+            if (wait <= 0) {
+                _pollLastReq = Date.now();
+                fn();
+            } else {
+                _pollQueue.push(fn);
+                if (!_pollTimer) {
+                    _pollTimer = setInterval(function () {
+                        if (_pollQueue.length === 0) { clearInterval(_pollTimer); _pollTimer = null; return; }
+                        var now2 = Date.now();
+                        if (now2 - _pollLastReq >= POLL_MIN_INTERVAL) {
+                            _pollLastReq = now2;
+                            (_pollQueue.shift())();
+                        }
+                    }, 1000);
+                }
+            }
+        }
+        /* canvas 检测：判断是否为 Pollinations 错误图（黄色背景）或纯色占位图 */
+        function isPollErrorImage(img) {
+            try {
+                var c = document.createElement("canvas");
+                var w = img.naturalWidth || img.width;
+                var h = img.naturalHeight || img.height;
+                if (!w || !h) return false;
+                /* 缩小采样，避免大图性能问题 */
+                var sw = Math.min(w, 64), sh = Math.min(h, 64);
+                c.width = sw; c.height = sh;
+                var ctx = c.getContext("2d");
+                ctx.drawImage(img, 0, 0, sw, sh);
+                var data = ctx.getImageData(0, 0, sw, sh).data;
+                var rSum = 0, gSum = 0, bSum = 0, n = 0;
+                for (var i = 0; i < data.length; i += 4) {
+                    rSum += data[i]; gSum += data[i + 1]; bSum += data[i + 2]; n++;
+                }
+                var rAvg = rSum / n, gAvg = gSum / n, bAvg = bSum / n;
+                /* 黄色背景检测：R 和 G 高，B 明显低（Pollinations 错误图为黄底） */
+                if (rAvg > 180 && gAvg > 150 && bAvg < 120 && (rAvg - bAvg) > 80) return true;
+                /* 纯色占位检测：所有像素方差极低 */
+                var rVar = 0, gVar = 0, bVar = 0;
+                for (var j = 0; j < data.length; j += 4) {
+                    rVar += (data[j] - rAvg) * (data[j] - rAvg);
+                    gVar += (data[j + 1] - gAvg) * (data[j + 1] - gAvg);
+                    bVar += (data[j + 2] - bAvg) * (data[j + 2] - bAvg);
+                }
+                var variance = (rVar + gVar + bVar) / (3 * n);
+                if (variance < 50) return true; /* 几乎纯色 → 占位/错误图 */
+                return false;
+            } catch (e) { return false; }
+        }
         function diagramSeed(desc) {
-            /* 简单字符串哈希，保证同描述同种子 */
             var s = String(desc || "");
             var h = 0;
             for (var i = 0; i < s.length; i++) { h = ((h << 5) - h) + s.charCodeAt(i); h |= 0; }
@@ -8443,33 +8515,57 @@ var IndoorRouter = (function () {
             else if (subj === "地理") styleTag = "geography diagram, map or terrain cross-section, labeled features, clean cartographic style, ";
             else styleTag = "clean educational illustration, directly depicting the described scene, ";
             var prompt = styleTag + desc + ", high quality, sharp, professional, no garbled text, no watermark, no abstract art, no random shapes";
-            /* 确定性种子：同描述同图，浏览器可缓存，重复访问秒级 */
             var seed = diagramSeed(prompt);
             return "https://image.pollinations.ai/prompt/" + encodeURIComponent(prompt) +
                 "?width=" + w + "&height=" + h + "&nologo=true&seed=" + seed;
         }
-        /* 生成配图 HTML：立即显示占位，图片加载成功后替换；缓存到 localStorage 实现秒级复用
-         * @param {string} desc - 图片描述
-         * @param {object} opts - { width, height, subject }
-         * @returns {string} HTML 字符串
-         */
+        /* 配图 HTML：占位 → 速率限制请求 → 错误图检测 → 缓存/降级 */
         function imgDiagramHTML(desc, opts) {
             opts = opts || {};
             var url = generateDiagram(desc, opts);
             var cacheKey = "wq_img_" + diagramSeed(url);
-            /* 尝试从 localStorage 读缓存（秒级命中） */
             var cached = null;
             try { cached = localStorage.getItem(cacheKey); } catch (e) {}
+            var descEsc = esc(desc).replace(/'/g, "&#39;");
             if (cached) {
                 return '<div style="margin:10px 0;text-align:center"><img src="' + cached + '" alt="' + esc(desc) + '" style="max-width:100%;max-height:300px;border-radius:8px;border:1px solid #e2e8f0" onerror="this.style.display=\'none\'" /></div>';
             }
-            /* 无缓存：显示加载占位 + 图片懒加载，加载成功后缓存 */
-            return '<div style="margin:10px 0;text-align:center;position:relative;min-height:120px;background:#f8fafc;border-radius:8px;border:1px dashed #cbd5e1;display:flex;align-items:center;justify-content:center">' +
-                '<span style="font-size:12px;color:#94a3b8">🖼 正在生成配图…</span>' +
-                '<img src="' + url + '" alt="' + esc(desc) + '" style="max-width:100%;max-height:300px;border-radius:8px;position:absolute;top:0;left:0;width:100%;height:100%;object-fit:contain;opacity:0;transition:opacity .3s" ' +
-                'onload="var s=this.style;s.opacity=1;this.parentElement.querySelector(\'span\').style.display=\'none\';try{var c=document.createElement(\'canvas\');var ctx=c.getContext(\'2d\');c.width=this.naturalWidth;c.height=this.naturalHeight;ctx.drawImage(this,0,0);localStorage.setItem(\'' + cacheKey + '\',c.toDataURL(\'image/jpeg\',0.85));}catch(e){}" ' +
-                'onerror="this.parentElement.innerHTML=\'<div style=\\\'font-size:12px;color:#94a3b8;padding:12px\\\'>📝 ' + esc(desc).replace(/'/g, "&#39;") + '</div>\'" />' +
+            /* 生成唯一 ID 供后续 JS 操作 */
+            var uid = "diag_" + Math.random().toString(36).slice(2, 9);
+            var html = '<div id="' + uid + '" style="margin:10px 0;text-align:center;position:relative;min-height:120px;background:#f8fafc;border-radius:8px;border:1px dashed #cbd5e1;display:flex;align-items:center;justify-content:center">' +
+                '<span class="diag-loading" style="font-size:12px;color:#94a3b8">🖼 正在生成配图…</span>' +
                 '</div>';
+            /* 速率限制：排队请求图片，避免触发 Pollinations 免费层限制 */
+            pollSchedule(function () {
+                var el = document.getElementById(uid);
+                if (!el) return;
+                var img = new Image();
+                img.crossOrigin = "anonymous";
+                img.style.maxWidth = "100%";
+                img.style.maxHeight = "300px";
+                img.style.borderRadius = "8px";
+                img.onload = function () {
+                    /* AI 图像检测：canvas 分析是否为错误图/占位图 */
+                    if (isPollErrorImage(img)) {
+                        /* 错误图：降级为文字描述，不缓存 */
+                        el.innerHTML = '<div style="font-size:12px;color:#64748b;padding:12px;line-height:1.6">📝 ' + descEsc + '</div>';
+                        return;
+                    }
+                    try {
+                        var c = document.createElement("canvas");
+                        c.width = img.naturalWidth; c.height = img.naturalHeight;
+                        c.getContext("2d").drawImage(img, 0, 0);
+                        localStorage.setItem(cacheKey, c.toDataURL("image/jpeg", 0.85));
+                    } catch (e) {}
+                    el.innerHTML = "";
+                    el.appendChild(img);
+                };
+                img.onerror = function () {
+                    el.innerHTML = '<div style="font-size:12px;color:#64748b;padding:12px;line-height:1.6">📝 ' + descEsc + '</div>';
+                };
+                img.src = url;
+            });
+            return html;
         }
         /* 判断题目文本是否需要配图 */
         function needsDiagram(text) {
