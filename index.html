@@ -7655,7 +7655,7 @@ var IndoorRouter = (function () {
                         if (cbs.onExplain) cbs.onExplain(exp);
                         explainDone = true;
                         stage = "mother";
-                        /* 母题超时兜底：20s 未出则跳过 */
+                        /* 母题超时兜底：40s 未出完整内容则降级 */
                         motherTimer = setTimeout(function () {
                             if (!motherDone && cbs.onMother) {
                                 cbs.onMother({
@@ -7666,7 +7666,7 @@ var IndoorRouter = (function () {
                                 });
                             }
                             motherDone = true; stage = "recs";
-                        }, 20000);
+                        }, 40000);
                         /* 推荐题超时兜底：30s 未出则给空数组 */
                         recsTimer = setTimeout(function () {
                             if (!recsDone && cbs.onRecs) cbs.onRecs([]);
@@ -7704,23 +7704,29 @@ var IndoorRouter = (function () {
                 var endMark = findMark(acc, "END");
                 if (mStart < 0) return;
 
-                if (!motherDone && rStart > mStart) {
-                    if (motherTimer) { clearTimeout(motherTimer); motherTimer = null; }
-                    var motherRaw = acc.slice(mStart + 5, rStart);
+                /* 母题段：从 ##母题## 到 ##推荐##（或当前末尾），流式增量更新，不等推荐标记 */
+                if (!motherDone) {
+                    var motherEnd = (rStart > mStart) ? rStart : acc.length;
+                    var motherRaw = acc.slice(mStart + 5, motherEnd);
                     var mother = parseMotherBlock(motherRaw);
-                    if (cbs.onMother) cbs.onMother(mother);
-                    motherDone = true;
-                    stage = "recs";
+                    if (mother.text || mother.kpExplain || mother.answer || mother.relation) {
+                        if (cbs.onMother) cbs.onMother(mother);
+                        /* 题干和知识点都齐了才算完整，清除超时 */
+                        if (mother.text && mother.kpExplain) {
+                            if (motherTimer) { clearTimeout(motherTimer); motherTimer = null; }
+                            motherDone = true;
+                            stage = "recs";
+                        }
+                    }
                 }
+                /* 推荐题段：需等 END 标记或流结束 */
                 if (rStart >= 0) {
                     var recsRaw = (endMark > rStart) ? acc.slice(rStart + 5, endMark) : acc.slice(rStart + 5);
                     if (final || endMark > 0) {
                         if (recsTimer) { clearTimeout(recsTimer); recsTimer = null; }
                         var recs = parseRecsBlock(recsRaw);
-                        /* 推荐题生成不出兜底：返回空数组，UI 显示提示 */
                         if (cbs.onRecs) cbs.onRecs(recs);
-                        recsDone = true;
-                        stage = "done";
+                        recsDone = true; stage = "done";
                     }
                 }
             }
@@ -7730,14 +7736,21 @@ var IndoorRouter = (function () {
                 /* 还原字面 \\n 为真换行，再按行解析 */
                 var lines = String(raw).replace(/\\r\\n/g, "\n").replace(/\\n/g, "\n").replace(/\\r/g, "\n").split(/\n/);
                 var cur = "";
+                /* 字段标签正则：兼容 题干： / **题干**： / ### 题干： / 题干: 等格式 */
+                var reField = function (name) {
+                    return new RegExp("^[#]{0,6}\\s*(\\*\\*)?" + name + "(\\*\\*)?\\s*[:：]\\s*");
+                };
                 for (var i = 0; i < lines.length; i++) {
                     var ln = lines[i];
-                    if (/^题干[:：]/.test(ln)) { cur = "text"; m.text = ln.replace(/^题干[:：]\s*/, ""); }
-                    else if (/^答案[:：]/.test(ln)) { cur = "answer"; m.answer = ln.replace(/^答案[:：]\s*/, ""); }
-                    else if (/^知识点[:：]/.test(ln)) { cur = "kpExplain"; m.kpExplain = ln.replace(/^知识点[:：]\s*/, ""); }
-                    else if (/^演变[:：]/.test(ln)) { cur = "relation"; m.relation = ln.replace(/^演变[:：]\s*/, ""); }
-                    else if (cur) { m[cur] += "\n" + ln; }
+                    var lnTrim = ln.trim();
+                    if (reField("题干").test(lnTrim)) { cur = "text"; m.text = lnTrim.replace(reField("题干"), ""); }
+                    else if (reField("答案").test(lnTrim)) { cur = "answer"; m.answer = lnTrim.replace(reField("答案"), ""); }
+                    else if (reField("知识点").test(lnTrim)) { cur = "kpExplain"; m.kpExplain = lnTrim.replace(reField("知识点"), ""); }
+                    else if (reField("演变").test(lnTrim)) { cur = "relation"; m.relation = lnTrim.replace(reField("演变"), ""); }
+                    else if (cur) { m[cur] += (m[cur] ? "\n" : "") + ln; }
                 }
+                /* 清理首尾空白 */
+                for (var k in m) { if (typeof m[k] === "string") m[k] = m[k].trim(); }
                 return m;
             }
 
