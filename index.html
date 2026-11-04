@@ -7704,19 +7704,19 @@ var IndoorRouter = (function () {
                 var endMark = findMark(acc, "END");
                 if (mStart < 0) return;
 
-                /* 母题段：从 ##母题## 到 ##推荐##（或当前末尾），流式增量更新，不等推荐标记 */
+                /* 母题段：从 ##母题## 到 ##推荐##（或当前末尾），流式增量更新 */
                 if (!motherDone) {
                     var motherEnd = (rStart > mStart) ? rStart : acc.length;
                     var motherRaw = acc.slice(mStart + 5, motherEnd);
                     var mother = parseMotherBlock(motherRaw);
                     if (mother.text || mother.kpExplain || mother.answer || mother.relation) {
                         if (cbs.onMother) cbs.onMother(mother);
-                        /* 题干和知识点都齐了才算完整，清除超时 */
-                        if (mother.text && mother.kpExplain) {
-                            if (motherTimer) { clearTimeout(motherTimer); motherTimer = null; }
-                            motherDone = true;
-                            stage = "recs";
-                        }
+                    }
+                    /* 只有看到 ##推荐## 标记或流结束才锁定母题，避免知识点只收到一个词就 finalize */
+                    if (rStart > mStart || final) {
+                        if (motherTimer) { clearTimeout(motherTimer); motherTimer = null; }
+                        motherDone = true;
+                        stage = "recs";
                     }
                 }
                 /* 推荐题段：需等 END 标记或流结束 */
@@ -8451,32 +8451,7 @@ var IndoorRouter = (function () {
             return "••••••••" + k.slice(-4);
         }
 
-        /* ===== 配图生成：错误图检测 + 速率限制 + 缓存 ===== */
-        /* 全局速率限制：Pollinations 免费层约 1 图/60秒，客户端排队避免触发限制 */
-        var _pollLastReq = 0;
-        var _pollQueue = [];
-        var _pollTimer = null;
-        var POLL_MIN_INTERVAL = 62000; /* 毫秒，略大于 60s 留余量 */
-        function pollSchedule(fn) {
-            var now = Date.now();
-            var wait = Math.max(0, POLL_MIN_INTERVAL - (now - _pollLastReq));
-            if (wait <= 0) {
-                _pollLastReq = Date.now();
-                fn();
-            } else {
-                _pollQueue.push(fn);
-                if (!_pollTimer) {
-                    _pollTimer = setInterval(function () {
-                        if (_pollQueue.length === 0) { clearInterval(_pollTimer); _pollTimer = null; return; }
-                        var now2 = Date.now();
-                        if (now2 - _pollLastReq >= POLL_MIN_INTERVAL) {
-                            _pollLastReq = now2;
-                            (_pollQueue.shift())();
-                        }
-                    }, 1000);
-                }
-            }
-        }
+        /* ===== 配图生成：错误图检测 + 即时请求 + 错误重试 + 缓存 ===== */
         /* canvas 检测：判断是否为 Pollinations 错误图（黄色背景）或纯色占位图 */
         function isPollErrorImage(img) {
             try {
@@ -8484,7 +8459,6 @@ var IndoorRouter = (function () {
                 var w = img.naturalWidth || img.width;
                 var h = img.naturalHeight || img.height;
                 if (!w || !h) return false;
-                /* 缩小采样，避免大图性能问题 */
                 var sw = Math.min(w, 64), sh = Math.min(h, 64);
                 c.width = sw; c.height = sh;
                 var ctx = c.getContext("2d");
@@ -8495,9 +8469,7 @@ var IndoorRouter = (function () {
                     rSum += data[i]; gSum += data[i + 1]; bSum += data[i + 2]; n++;
                 }
                 var rAvg = rSum / n, gAvg = gSum / n, bAvg = bSum / n;
-                /* 黄色背景检测：R 和 G 高，B 明显低（Pollinations 错误图为黄底） */
                 if (rAvg > 180 && gAvg > 150 && bAvg < 120 && (rAvg - bAvg) > 80) return true;
-                /* 纯色占位检测：所有像素方差极低 */
                 var rVar = 0, gVar = 0, bVar = 0;
                 for (var j = 0; j < data.length; j += 4) {
                     rVar += (data[j] - rAvg) * (data[j] - rAvg);
@@ -8505,7 +8477,7 @@ var IndoorRouter = (function () {
                     bVar += (data[j + 2] - bAvg) * (data[j + 2] - bAvg);
                 }
                 var variance = (rVar + gVar + bVar) / (3 * n);
-                if (variance < 50) return true; /* 几乎纯色 → 占位/错误图 */
+                if (variance < 50) return true;
                 return false;
             } catch (e) { return false; }
         }
@@ -8532,7 +8504,7 @@ var IndoorRouter = (function () {
             return "https://image.pollinations.ai/prompt/" + encodeURIComponent(prompt) +
                 "?width=" + w + "&height=" + h + "&nologo=true&seed=" + seed;
         }
-        /* 配图 HTML：占位 → 速率限制请求 → 错误图检测 → 缓存/降级 */
+        /* 配图 HTML：即时请求 → 错误图检测 → 重试(最多2次) → 缓存/降级 */
         function imgDiagramHTML(desc, opts) {
             opts = opts || {};
             var url = generateDiagram(desc, opts);
@@ -8543,13 +8515,13 @@ var IndoorRouter = (function () {
             if (cached) {
                 return '<div style="margin:10px 0;text-align:center"><img src="' + cached + '" alt="' + esc(desc) + '" style="max-width:100%;max-height:300px;border-radius:8px;border:1px solid #e2e8f0" onerror="this.style.display=\'none\'" /></div>';
             }
-            /* 生成唯一 ID 供后续 JS 操作 */
             var uid = "diag_" + Math.random().toString(36).slice(2, 9);
-            var html = '<div id="' + uid + '" style="margin:10px 0;text-align:center;position:relative;min-height:120px;background:#f8fafc;border-radius:8px;border:1px dashed #cbd5e1;display:flex;align-items:center;justify-content:center">' +
-                '<span class="diag-loading" style="font-size:12px;color:#94a3b8">🖼 正在生成配图…</span>' +
+            var html = '<div id="' + uid + '" style="margin:10px 0;text-align:center;position:relative;min-height:100px;background:#f8fafc;border-radius:8px;border:1px dashed #cbd5e1;display:flex;align-items:center;justify-content:center">' +
+                '<span style="font-size:12px;color:#94a3b8">🖼 正在生成配图…</span>' +
                 '</div>';
-            /* 速率限制：排队请求图片，避免触发 Pollinations 免费层限制 */
-            pollSchedule(function () {
+            /* 即时请求，不预等待；触发限制时由错误图检测+重试兜底 */
+            var retryCount = 0;
+            function loadImg() {
                 var el = document.getElementById(uid);
                 if (!el) return;
                 var img = new Image();
@@ -8558,10 +8530,15 @@ var IndoorRouter = (function () {
                 img.style.maxHeight = "300px";
                 img.style.borderRadius = "8px";
                 img.onload = function () {
-                    /* AI 图像检测：canvas 分析是否为错误图/占位图 */
                     if (isPollErrorImage(img)) {
-                        /* 错误图：降级为文字描述，不缓存 */
-                        el.innerHTML = '<div style="font-size:12px;color:#64748b;padding:12px;line-height:1.6">📝 ' + descEsc + '</div>';
+                        /* 错误图：重试最多2次，间隔15s；仍失败则降级文字 */
+                        if (retryCount < 2) {
+                            retryCount++;
+                            el.querySelector("span") && (el.querySelector("span").textContent = "🖼 配图生成中…(" + retryCount + "/2)");
+                            setTimeout(loadImg, 15000);
+                        } else {
+                            el.innerHTML = '<div style="font-size:12px;color:#64748b;padding:12px;line-height:1.6">📝 ' + descEsc + '</div>';
+                        }
                         return;
                     }
                     try {
@@ -8574,10 +8551,16 @@ var IndoorRouter = (function () {
                     el.appendChild(img);
                 };
                 img.onerror = function () {
-                    el.innerHTML = '<div style="font-size:12px;color:#64748b;padding:12px;line-height:1.6">📝 ' + descEsc + '</div>';
+                    if (retryCount < 2) {
+                        retryCount++;
+                        setTimeout(loadImg, 8000);
+                    } else {
+                        el.innerHTML = '<div style="font-size:12px;color:#64748b;padding:12px;line-height:1.6">📝 ' + descEsc + '</div>';
+                    }
                 };
-                img.src = url;
-            });
+                img.src = url + (url.indexOf("?") >= 0 ? "&" : "?") + "t=" + Date.now();
+            }
+            loadImg();
             return html;
         }
         /* 判断题目文本是否需要配图 */
