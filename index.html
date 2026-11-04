@@ -7605,7 +7605,7 @@ var IndoorRouter = (function () {
                     ? "【重要纪律】回答时直接给出最新、最准确的信息，自然流畅地作答。绝对不要出现「搜索」「联网」「线索」「背景资料」「根据你提供的」「如上所示」等任何暴露信息来源的字眼，就像你本来就知道这些最新事实一样。"
                     : "【时效性】若题目涉及体育赛事、明星动态、游戏版本、时事热点等可能随时间变化的内容，请基于你最新的知识库给出最准确的回答，不要使用过时的年份或数据。如果你不确定最新情况，就基于你掌握的最新信息回答，不要刻意强调知识截止。") +
                 searchBlock +
-                "数学公式用LaTeX，如$x^2$、$\\frac{a}{b}$。配图要准确恰当、与内容相关，在需要可视化辅助理解的位置插入 [IMG:一句话精确描述图的内容]，例如[IMG:正四面体ABCD，每条棱接电阻R，求AB间等效电阻]。只要配图与内容相关且有助于理解就可以配，不要配无关图片。>\n\n" +
+                "数学公式用LaTeX，如$x^2$、$\\frac{a}{b}$。配图必须准确应景、直接对应题目内容，在需要可视化辅助理解的位置插入 [IMG:描述]。描述要具体到画面要素（物体、位置、标注、场景），例如[IMG:正四面体ABCD，每条棱接电阻R，求AB间等效电阻]、[IMG:抛物线y=x²上有两点A(1,1)和B(2,4)，连接AB]。严禁配与题目无关的抽象图或装饰图。>\n\n" +
                 "##母题##\n题干：<追溯到该知识点最根本、最原型的母题题干，要有强母题性——能衍生出一类题的典型原型题>\n答案：<母题答案与解析，采用最优/最经典解法>\n知识点：<讲透母知识点：本质、定义、核心公式/定理、适用边界、常见误区，覆盖所有知识源，精当概括>\n演变：<原题如何从母题演变而来，说清变式路径>\n\n" +
                 "##推荐##\n<JSON数组，必须输出3道题，严禁省略！以原题知识点为根，进行拓展、深化、探索，严禁出与原题无关的题目>\n" +
                 '格式：[{"text":"题干（单行，不要换行）","answer":"答案","solution":"解析（采用最优解法）","diff":' + targetD + ',"layer":"基础|变式|拔高"}]\n' +
@@ -7634,11 +7634,18 @@ var IndoorRouter = (function () {
                         if (cbs.onExplain) cbs.onExplain(exp);
                         explainDone = true;
                         stage = "mother";
-                        /* 母题超时兜底：15s 未出则跳过 */
+                        /* 母题超时兜底：20s 未出则跳过 */
                         motherTimer = setTimeout(function () {
-                            if (!motherDone && cbs.onMother) cbs.onMother({ text: "", answer: "", kpExplain: "（母题溯源超时）", relation: "" });
+                            if (!motherDone && cbs.onMother) {
+                                cbs.onMother({
+                                    text: "围绕" + (kps && kps[0] ? kps[0] : "核心知识点") + "的典型原型题",
+                                    answer: "",
+                                    kpExplain: "母题溯源超时，请直接查看讲解中的知识点说明。",
+                                    relation: "本题可视为该知识点的直接应用。"
+                                });
+                            }
                             motherDone = true; stage = "recs";
-                        }, 15000);
+                        }, 20000);
                         /* 推荐题超时兜底：30s 未出则给空数组 */
                         recsTimer = setTimeout(function () {
                             if (!recsDone && cbs.onRecs) cbs.onRecs([]);
@@ -7725,7 +7732,14 @@ var IndoorRouter = (function () {
                 recs = recs.filter(function (r) { return r && r.text; }).map(function (r) {
                     var fix = function (s) {
                         if (typeof s !== "string") return s;
-                        return s.replace(/\\r\\n/g, "\n").replace(/\\n/g, "\n").replace(/\\r/g, "\n").replace(/\\t/g, "\t");
+                        /* 还原字面 \\n 等为真控制字符 */
+                        s = s.replace(/\\r\\n/g, "\n").replace(/\\n/g, "\n").replace(/\\r/g, "\n").replace(/\\t/g, "\t");
+                        /* 修复 LaTeX 命令被 JSON 转义吃掉反斜杠的问题：
+                           如 \text→tab+ext, \times→tab+imes, \theta→tab+heta 等 */
+                        s = s.replace(/\t(ext|imes|heta|au|an|anh|frac|binom|op|riple|ag|wo)\b/g, "\\t$1");
+                        /* \newcommand 等 \n 开头的命令 */
+                        s = s.replace(/\n(ewcommand|ewline|ot|ull|abla)\b/g, "\\n$1");
+                        return s;
                     };
                     r.text = fix(r.text).replace(/[\r\n]+/g, " ").replace(/\s+/g, " ").trim();
                     r.answer = fix(r.answer);
@@ -8422,12 +8436,13 @@ var IndoorRouter = (function () {
             var h = opts.height || 480;
             var subj = opts.subject || "";
             var styleTag = "";
-            if (subj === "物理") styleTag = "physics diagram, clean technical drawing, labeled components, black on white background, ";
-            else if (subj === "数学") styleTag = "mathematical geometry diagram, precise construction, labeled points and lines, black on white background, ";
-            else if (subj === "化学") styleTag = "chemistry diagram, molecular structure or apparatus, clean scientific illustration, ";
-            else if (subj === "生物") styleTag = "biology diagram, anatomical or cellular structure, clean scientific illustration, ";
-            else styleTag = "clean educational illustration, ";
-            var prompt = styleTag + desc + ", high quality, clear, no abstract art, no random shapes";
+            if (subj === "物理") styleTag = "physics diagram, clean technical line drawing, labeled with letters A B C, arrows for forces/velocity, black on white background, precise schematic, ";
+            else if (subj === "数学") styleTag = "mathematical geometry diagram, precise Euclidean construction, labeled points A B C, straight lines and curves, black on white background, ";
+            else if (subj === "化学") styleTag = "chemistry diagram, molecular structure or lab apparatus, clean scientific illustration, labeled parts, ";
+            else if (subj === "生物") styleTag = "biology diagram, anatomical or cellular structure, clean labeled scientific illustration, ";
+            else if (subj === "地理") styleTag = "geography diagram, map or terrain cross-section, labeled features, clean cartographic style, ";
+            else styleTag = "clean educational illustration, directly depicting the described scene, ";
+            var prompt = styleTag + desc + ", high quality, sharp, professional, no garbled text, no watermark, no abstract art, no random shapes";
             /* 确定性种子：同描述同图，浏览器可缓存，重复访问秒级 */
             var seed = diagramSeed(prompt);
             return "https://image.pollinations.ai/prompt/" + encodeURIComponent(prompt) +
@@ -9811,6 +9826,13 @@ var IndoorRouter = (function () {
 
             /* 抽取为闭包 paintRecs(recsArr)，便于 AI 推题返回后合并重渲染 */
             function paintRecs(recsArr) {
+                /* 系统级难度校验：确保推荐题难度 ≥ 原题难度+1，避免虚假+1 */
+                var minRecDiff = Math.min(10, (origDiff || 1) + 1);
+                for (var ri = 0; ri < recsArr.length; ri++) {
+                    if (!recsArr[ri].diff || recsArr[ri].diff < minRecDiff) {
+                        recsArr[ri].diff = minRecDiff;
+                    }
+                }
                 var ls = { low: [], mid: [], high: [], top: [] };
                 for (var rr = 0; rr < recsArr.length; rr++) {
                     var dd = recsArr[rr].diff || 1;
@@ -10119,70 +10141,6 @@ var IndoorRouter = (function () {
                     tips.push("推荐题均围绕 " + (_wqKps ? _wqKps.join("、") : "") + "，难度 L" + Math.min(10, origDiff + 1) + " 起步");
                     tips.push("做完推荐题后回到本题，用同样方法独立重做一遍，检验是否真正掌握");
                     tipEl.innerHTML = tips.map(function (t) { return '<div class="wq-tip-item">💡 ' + t + '</div>'; }).join("");
-                }
-            }
-
-            /* 题库同类题参考（强检索）：从全部题库题目中按相似度+知识点重合度排序，始终返回最相关的若干题 */
-            var simRefEl = document.getElementById("wqSimilarRef");
-            if (simRefEl) {
-                if (origText.trim() && !isNonStandard) {
-                    var allBankQ = (window.WQ_PIPELINE_B && WQ_PIPELINE_B.getAllQuestions) ? WQ_PIPELINE_B.getAllQuestions() : [];
-                    var simCands = [];
-                    var kpArr = _wqKps || [];
-                    for (var bi = 0; bi < allBankQ.length; bi++) {
-                        var bq = allBankQ[bi];
-                        if (!bq || !bq.text) continue;
-                        /* 排除与原题几乎相同的题（雷同） */
-                        var ss = textSim(origText, bq.text);
-                        if (ss > 0.88) continue;
-                        /* 知识点重合加分：题库题的 kp 与原题知识点重合 */
-                        var bqKp = bq.kp || "";
-                        var kpHit = 0;
-                        if (bqKp) {
-                            for (var ki = 0; ki < kpArr.length; ki++) {
-                                if (bqKp.indexOf(kpArr[ki]) >= 0 || kpArr[ki].indexOf(bqKp) >= 0) { kpHit++; break; }
-                            }
-                        }
-                        /* 同学科加分 */
-                        var subHit = (bq.subject === sub) ? 1 : 0;
-                        /* 综合分：文本相似度 0.6 + 知识点重合 0.25 + 同学科 0.15 */
-                        var score = ss * 0.6 + (kpHit ? 0.25 : 0) + (subHit ? 0.15 : 0);
-                        /* 只要有一定相关性就纳入（文本相似>0.12 或 知识点重合），再排序取前几 */
-                        if (ss > 0.12 || kpHit) {
-                            simCands.push({ q: bq, sim: ss, score: score, kp: bqKp, subHit: subHit, kpHit: kpHit });
-                        }
-                    }
-                    /* 按综合分降序，取前 5 道 */
-                    simCands.sort(function (a, b) { return b.score - a.score; });
-                    simCands = simCands.slice(0, 5);
-                    if (simCands.length) {
-                        var sh = '<div style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;padding:10px 12px;margin-top:4px">';
-                        sh += '<div style="font-size:12px;color:#64748b;margin-bottom:8px">📚 以下为题库中与原题最相关的题目（按相似度+知识点匹配排序），可点击查看完整解析：</div>';
-                        for (var ci = 0; ci < simCands.length; ci++) {
-                            var c = simCands[ci];
-                            sh += '<div class="wq-bank-ref-card" style="background:#fff;border:1px solid #e2e8f0;border-radius:6px;padding:8px 10px;margin-bottom:8px;cursor:pointer" data-bankref="' + ci + '">' +
-                                '<div style="font-size:13px;color:#1e293b;line-height:1.6">' + esc(c.q.text) + '</div>' +
-                                '<div style="margin-top:4px;display:flex;flex-wrap:wrap;gap:4px;align-items:center">' +
-                                '<span class="wq-kp-tag small">' + esc(c.q.subject || "") + '</span>' +
-                                (c.kp ? '<span class="wq-kp-tag small" style="background:#eef2ff;color:#4338ca">' + esc(c.kp) + '</span>' : '') +
-                                ' <span style="font-size:11px;color:#94a3b8">相关度 ' + Math.round(c.score * 100) + '%</span>' +
-                                (c.kpHit ? ' <span style="font-size:11px;color:#059669">· 知识点匹配</span>' : '') +
-                                '</div>' +
-                                '<div class="wq-bank-ref-sol" style="display:none;margin-top:8px;padding-top:8px;border-top:1px dashed #e2e8f0">' +
-                                (c.q.answer ? '<div style="font-size:13px;color:#166534;margin-bottom:4px"><b>答案：</b>' + esc(c.q.answer) + '</div>' : '') +
-                                (c.q.solution ? '<div style="font-size:12px;color:#64748b;line-height:1.6">' + esc(c.q.solution) + '</div>' : '') +
-                                (c.q.source ? '<div style="font-size:11px;color:#94a3b8;margin-top:4px">来源：' + esc(c.q.source) + '</div>' : '') +
-                                '</div>' +
-                                '<button class="wq-toggle-sol" style="margin-top:6px" onclick="var s=this.parentElement.querySelector(\'.wq-bank-ref-sol\');s.style.display=s.style.display===\'block\'?\'none\':\'block\';this.textContent=s.style.display===\'block\'?\'▼ 收起解析\':\'▶ 查看答案与解析\'">▶ 查看答案与解析</button>' +
-                                '</div>';
-                        }
-                        sh += '</div>';
-                        simRefEl.innerHTML = sh;
-                    } else {
-                        simRefEl.innerHTML = '<div style="font-size:13px;color:#94a3b8;padding:8px 0">题库中暂无相关题目。系统会定期自动从真实分析中搜题入库，也可点击「扩展题库」手动补充。</div>';
-                    }
-                } else {
-                    simRefEl.innerHTML = '<div style="font-size:13px;color:#64748b;padding:8px 0">识别原题后展示题库中最相关的题目，供对照参考。</div>';
                 }
             }
 
@@ -10631,7 +10589,6 @@ var IndoorRouter = (function () {
                             '<div class="wq-item-text">' + txt + '</div>' +
                             '<div class="wq-item-actions">' +
                                 '<select class="wq-cat-sel" data-wqcat="' + r.id + '" style="padding:4px 6px;border:1px solid #c4b5fd;border-radius:6px;font-size:12px;background:#f5f3ff;color:#5b21b6;cursor:pointer"><option value="">📂 移动到…</option>' + catOptions + '</select>' +
-                                '<button class="wq-search" data-wqsearch="' + r.id + '">🔄 重新分析</button>' +
                                 (r.analysis ? '<button class="wq-view-analysis" data-wqview="' + r.id + '" style="background:#0f766e;color:#fff">📖 查看原分析</button>' : '') +
                                 '<button class="wq-upload-good" data-wqupload="' + r.id + '" style="background:#8b5cf6;color:#fff">⭐ 检验好题</button>' +
                                 '<button class="wq-del" data-wqdel="' + r.id + '">🗑 删除</button>' +
@@ -10652,19 +10609,6 @@ var IndoorRouter = (function () {
                         var id = Number(b.getAttribute("data-wqdel"));
                         saveWQ(getWQ().filter(function (r) { return r.id !== id; }));
                         openWQList();
-                    });
-                });
-                box.querySelectorAll("[data-wqsearch]").forEach(function (b) {
-                    b.addEventListener("click", function () {
-                        var id = Number(b.getAttribute("data-wqsearch"));
-                        var item = getWQ().filter(function (r) { return r.id === id; })[0];
-                        if (item) {
-                            document.getElementById("wqText").value = item.text || "";
-                            closeWQList();
-                            openWQ();
-                            document.getElementById("wqText").value = item.text || "";
-                            runWQRecognize();
-                        }
                     });
                 });
                 /* 查看原分析：恢复保存时的完整分析面板，无需重新跑AI */
@@ -11298,9 +11242,9 @@ var IndoorRouter = (function () {
                 var ua = quiz.answers[j];
                 var ok = ua === qq.answer;
                 html += '<div style="padding:10px 12px;background:' + (ok ? "#f0fdf4" : "#fef2f2") + ';border:1px solid ' + (ok ? "#bbf7d0" : "#fecaca") + ';border-radius:8px;margin-bottom:8px;font-size:13px">' +
-                    '<div style="font-weight:600;margin-bottom:4px">' + (ok ? "✅" : "❌") + ' ' + esc(qq.q).slice(0, 80) + '</div>' +
+                    '<div style="font-weight:600;margin-bottom:6px;line-height:1.6">' + (ok ? "✅" : "❌") + ' ' + renderMath(esc(qq.q)) + '</div>' +
                     '<div style="color:#64748b">你的答案：' + String.fromCharCode(65 + (ua != null ? ua : -1)) + ' · 正确答案：' + String.fromCharCode(65 + qq.answer) + '</div>' +
-                    (qq.explain ? '<div style="color:#475569;margin-top:4px">解析：' + esc(qq.explain).slice(0, 120) + '</div>' : '') +
+                    (qq.explain ? '<div style="color:#475569;margin-top:6px;line-height:1.6">解析：' + renderMath(esc(qq.explain)) + '</div>' : '') +
                     '</div>';
             }
             html += '</div>';
@@ -15525,8 +15469,6 @@ var currentIndoorBld = null;   // 当前进入楼内导航的楼栋（BUILDINGS 
                 _wqReviewScopeCat = scopeCat;
                 showWQReviewPrompt();
             });
-            var wqRetry = document.getElementById("wqAiRetry");
-            if (wqRetry) wqRetry.addEventListener("click", runWQRecognize);
             /* 新建分类 */
             var wqAddCatBtnEl = document.getElementById("wqAddCatBtn");
             if (wqAddCatBtnEl) wqAddCatBtnEl.addEventListener("click", function () {
@@ -18814,7 +18756,6 @@ body.fire-mode #fireOverlay{display:flex}
         <span class="wq-ai-title">🔍 分析</span>
         <div style="display:flex;gap:6px;align-items:center">
           <button type="button" id="wqBackToList" style="display:none;padding:4px 10px;background:#8b5cf6;color:#fff;border:none;border-radius:6px;font-size:12px;cursor:pointer">← 题目列表</button>
-          <button type="button" id="wqAiRetry" class="wq-ai-retry">🔄 重新分析</button>
         </div>
       </div>
       <div class="wq-ai-row">
@@ -18862,9 +18803,6 @@ body.fire-mode #fireOverlay{display:flex}
       <div class="wq-rec-title">📚 分层推荐</div>
       <div class="wq-rec-list" id="wqRecList"></div>
       <div class="wq-tip-box" id="wqTipBox"></div>
-      <!-- 题库同类题参考（流水线 B 来源，与"讲透"物理隔离，仅供参考） -->
-      <div class="wq-rec-title">🔍 题库同类题参考</div>
-      <div id="wqSimilarRef" style="font-size:13px;color:#64748b;padding:8px 0">识别原题后展示题库中高度相似的题目，供对照参考。</div>
     </div>
 
     <button type="button" class="fb-submit" id="wqSave">💾 保存到错题本</button>
