@@ -7406,7 +7406,7 @@ var IndoorRouter = (function () {
         }
 
         /* 时新消息检测：判断题目是否涉及需要联网获取最新信息的内容 */
-        var TIME_SENSITIVE_KW = /最近|近期|刚刚|今天|昨天|最新|当前|现在|本年|今年|本月|争议|风波|舆论|事件|新闻|热点|赛季|转会|签约|退役|复出|夺冠|冠军|决赛|世界杯|欧冠|英超|西甲|意甲|德甲|法甲|中超|NBA|CBA|亚冠|梅西|C罗|姆巴佩|内马尔|哈兰德|詹姆斯|库里|科比|版本更新|补丁|削弱|增强|发布|上线|上映|开播|去世|结婚|离婚|怀孕|当选|上任|辞职|价格|股价|汇率|利率|人口|GDP|通胀|嫦娥|王者|英雄|手游|端游|电竞|战队/;
+        var TIME_SENSITIVE_KW = /最近|近期|刚刚|今天|昨天|最新|当前|现在|本年|今年|本月|争议|风波|舆论|事件|新闻|热点|赛季|转会|签约|退役|复出|夺冠|冠军|决赛|世界杯|欧冠|英超|西甲|意甲|德甲|法甲|中超|NBA|CBA|亚冠|梅西|C罗|姆巴佩|内马尔|哈兰德|詹姆斯|库里|科比|版本更新|补丁|削弱|增强|发布|上线|上映|开播|去世|结婚|离婚|怀孕|当选|上任|辞职|价格|股价|汇率|利率|人口|GDP|通胀|嫦娥|王者|英雄|手游|端游|电竞|战队|预测|未来|趋势|走向|发展|变化|演变|前景|展望|十年|五年|三年|下一年|明年|后年|多少年后|若干年后|统计|数据|报告|调查|研究表明|据统计/;
         function isTimeSensitive(text) {
             if (!text) return false;
             return TIME_SENSITIVE_KW.test(text);
@@ -7432,8 +7432,9 @@ var IndoorRouter = (function () {
                 "4=变式应用(需变形/换元)，5=方法迁移(选方法+多步计算)，6=多步推理(3步以上逻辑链)，" +
                 "7=综合建模(建立模型+多知识点融合)，8=思想方法(分类讨论/数形结合/构造等高级思想)，" +
                 "9=拓展探究(竞赛级/需构造/非常规解法)，10=原创研究(科研级/开放性/无固定解法)。" +
+                "【非标准分析题难度】涉及预测未来、趋势分析、观点评价、原因探究、开放性论述、跨领域综合分析等需要知识运用和推理能力的题目，难度不应低于4级（需一定分析能力），开放性强、无固定答案的可给5-7级。只有纯记忆/纯事实陈述才给1-2级。" +
                 "【严格上限】常规求导/零点/参数范围/单调性/极值题≤8；只有竞赛题、需构造辅助函数、证明复杂不等式、组合计数等才给9；只有科研级开放题才给10。知识点要精准，2-4个。" +
-                "【timeSensitive 字段】若题目涉及体育赛事/明星动态/游戏版本/时事热点/政策法规/统计数据等可能随时间变化的内容，timeSensitive 设为 true，否则 false。" +
+                "【timeSensitive 字段】若题目涉及体育赛事/明星动态/游戏版本/时事热点/政策法规/统计数据/未来预测/趋势分析/发展变化等可能随时间变化或需要最新数据支撑的内容，timeSensitive 设为 true，否则 false。" +
                 "【重要】返回的 JSON 中必须包含 \"text\" 字段：若有图片，text 为从图片中提取的完整题目原文（不要只写用户输入的指令）；若无图片，text 为用户输入的题目原文。" +
                 "\n【多题检测（灵活判断）】仅当内容中存在多道彼此独立、各自有完整题干和答案的题目时才拆分。" +
                 "判断原则：① 对话/聊天记录/连续段落/阅读理解（含多个小问但共享同一材料）→ 视为【一道题】，不要拆分；" +
@@ -7590,23 +7591,25 @@ var IndoorRouter = (function () {
                 ? "\n【最新背景资料】\n" + searchContext + "\n"
                 : "";
             var sysPrompt = "你是一位" + (subject || "全科") + "金牌讲师。请严格按以下分段格式输出（先讲解，再母题，最后推荐题）：\n\n" +
-                "##讲解##\n<【讲透原题——讲解要细致，从最基础的概念讲起，不假设学生有任何前置知识，用大白话把每个概念和步骤讲清楚】\n" +
+                "##讲解##\n<【讲透原题——直接解题，不在开头恶补知识点】\n" +
                 "讲解要求：\n" +
-                "1. 先一句话点明这道题考什么知识点，为什么会有这道题；\n" +
-                "2. 把涉及的核心概念/公式用大白话解释一遍，像给零基础的人补基础，不要假设学生记得；\n" +
-                "3. 给出完整解题步骤，每一步都说明'为什么这么做'，关键计算不能跳步；\n" +
-                "4. 最后给出明确答案；\n" +
-                "5. 点出学生最容易犯的错或最容易卡住的地方。\n" +
-                "【答案正确性自校】输出前请自检：①答案是否符合题目条件？②推理步骤是否每一步都成立？③是否有更优/更标准的解法？如发现错误请立即修正后再输出。\n" +
+                "1. 直接开始解题，不要先用一大段话补基础概念。假设学生只是本节课昏睡了，之前的基础还在；\n" +
+                "2. 按解题步骤逐步推进，每一步给出计算/推理过程；\n" +
+                "3. 只在「本节课昏睡的人」可能看不懂的关键步骤处，用括号或简短批注解释该步骤的依据（如：「这一步用了本节课学的洛必达法则，因为是0/0型」）；\n" +
+                "4. 学生已经会的基础步骤（如简单代数变形、代入公式）不要重复注解，避免啰嗦；\n" +
+                "5. 最后给出明确答案；\n" +
+                "6. 结尾点出本题最容易犯的错或最容易卡住的地方（一句话）。\n" +
+                "【核心原则】像老师在黑板上带着学生一步步做题，而不是从头讲新课。只注解本节课新学的、学生可能因昏睡而没听到的关键点。\n" +
+                "【答案正确性自校】输出前请自检：①答案是否符合题目条件？②推理步骤是否每一步都成立？③是否有更优/更标准的解法？如有更优解法请直接采用最优解法。如发现错误请立即修正后再输出。\n" +
                 (hasSearch
                     ? "【重要纪律】回答时直接给出最新、最准确的信息，自然流畅地作答。绝对不要出现「搜索」「联网」「线索」「背景资料」「根据你提供的」「如上所示」等任何暴露信息来源的字眼，就像你本来就知道这些最新事实一样。"
                     : "【时效性】若题目涉及体育赛事、明星动态、游戏版本、时事热点等可能随时间变化的内容，请基于你最新的知识库给出最准确的回答，不要使用过时的年份或数据。如果你不确定最新情况，就基于你掌握的最新信息回答，不要刻意强调知识截止。") +
                 searchBlock +
                 "数学公式用LaTeX，如$x^2$、$\\frac{a}{b}$。配图要准确恰当、与内容相关，在需要可视化辅助理解的位置插入 [IMG:一句话精确描述图的内容]，例如[IMG:正四面体ABCD，每条棱接电阻R，求AB间等效电阻]。只要配图与内容相关且有助于理解就可以配，不要配无关图片。>\n\n" +
-                "##母题##\n题干：<追溯到该知识点最根本、最原型的母题题干>\n答案：<母题答案与解析>\n知识点：<讲透母知识点：本质、定义、核心公式/定理、适用边界、常见误区，覆盖所有知识源，精当概括>\n演变：<原题如何从母题演变而来>\n\n" +
-                "##推荐##\n<JSON数组，必须输出3道题，严禁省略！严禁与原题题型重复或照抄做法，以知识点为根可拓展深化探索>\n" +
-                '格式：[{"text":"题干（单行，不要换行）","answer":"答案","solution":"解析","diff":' + targetD + ',"layer":"基础|变式|拔高"}]\n' +
-                "【重要】推荐题必须输出，无论题目类型如何，都必须生成3道分层推荐题。若原题非标准学科题，则围绕题目涉及的主题/领域生成3道同领域进阶题。难度均为L" + targetD + "，分别侧重基础巩固、变式迁移、拓展探究。数学公式用LaTeX。题干必须单行输出，不要插入换行。\n\n" +
+                "##母题##\n题干：<追溯到该知识点最根本、最原型的母题题干，要有强母题性——能衍生出一类题的典型原型题>\n答案：<母题答案与解析，采用最优/最经典解法>\n知识点：<讲透母知识点：本质、定义、核心公式/定理、适用边界、常见误区，覆盖所有知识源，精当概括>\n演变：<原题如何从母题演变而来，说清变式路径>\n\n" +
+                "##推荐##\n<JSON数组，必须输出3道题，严禁省略！以原题知识点为根，进行拓展、深化、探索，严禁出与原题无关的题目>\n" +
+                '格式：[{"text":"题干（单行，不要换行）","answer":"答案","solution":"解析（采用最优解法）","diff":' + targetD + ',"layer":"基础|变式|拔高"}]\n' +
+                "【重要】推荐题必须输出3道，无论题目类型如何。若原题非标准学科题，则围绕题目涉及的主题/领域生成3道同领域进阶题。难度均为L" + targetD + "（原题难度+2），三道题分别侧重：①基础巩固（同知识点直接应用）②变式迁移（变形/换元/迁移）③拓展探究（深化/探索/跨知识点融合）。解析必须采用最优/最简洁的解法。题干必须单行输出，不要插入换行。\n\n" +
                 "##END##";
             var messages = [
                 { role: "system", content: sysPrompt },
@@ -7617,7 +7620,8 @@ var IndoorRouter = (function () {
 
             var acc = "";
             var stage = "explain"; /* explain -> mother -> recs -> done */
-            var explainDone = false, motherDone = false;
+            var explainDone = false, motherDone = false, recsDone = false;
+            var motherTimer = null, recsTimer = null;
 
             WQ_AI_ROUTER.callStream(messages, taskType, function (full, delta) {
                 acc = full;
@@ -7630,6 +7634,16 @@ var IndoorRouter = (function () {
                         if (cbs.onExplain) cbs.onExplain(exp);
                         explainDone = true;
                         stage = "mother";
+                        /* 母题超时兜底：15s 未出则跳过 */
+                        motherTimer = setTimeout(function () {
+                            if (!motherDone && cbs.onMother) cbs.onMother({ text: "", answer: "", kpExplain: "（母题溯源超时）", relation: "" });
+                            motherDone = true; stage = "recs";
+                        }, 15000);
+                        /* 推荐题超时兜底：30s 未出则给空数组 */
+                        recsTimer = setTimeout(function () {
+                            if (!recsDone && cbs.onRecs) cbs.onRecs([]);
+                            recsDone = true; stage = "done";
+                        }, 30000);
                         /* 继续解析母题段 */
                         parseMotherAndRecs();
                     } else {
@@ -7663,6 +7677,7 @@ var IndoorRouter = (function () {
                 if (mStart < 0) return;
 
                 if (!motherDone && rStart > mStart) {
+                    if (motherTimer) { clearTimeout(motherTimer); motherTimer = null; }
                     var motherRaw = acc.slice(mStart + 5, rStart);
                     var mother = parseMotherBlock(motherRaw);
                     if (cbs.onMother) cbs.onMother(mother);
@@ -7672,8 +7687,11 @@ var IndoorRouter = (function () {
                 if (rStart >= 0) {
                     var recsRaw = (endMark > rStart) ? acc.slice(rStart + 5, endMark) : acc.slice(rStart + 5);
                     if (final || endMark > 0) {
+                        if (recsTimer) { clearTimeout(recsTimer); recsTimer = null; }
                         var recs = parseRecsBlock(recsRaw);
+                        /* 推荐题生成不出兜底：返回空数组，UI 显示提示 */
                         if (cbs.onRecs) cbs.onRecs(recs);
+                        recsDone = true;
                         stage = "done";
                     }
                 }
@@ -8347,6 +8365,10 @@ var IndoorRouter = (function () {
             /* 标准高中题型（求导/零点/参数范围/单调性/极值）封顶 L8 */
             var stdPattern = /求导|导数|零点|取值范围|单调性|极值|最值|定义域|周期|奇偶|积分|求极限/;
             var elitePattern = /竞赛|奥林匹克|IMO|CMO|推广|猜想|探究|不等式链|组合恒等式|群|环|域|拓扑|开放题|建模探究|构造.*证明/;
+            /* 非标准/开放性/分析推理题：需要知识分析能力，不应判为 L1-L2 */
+            var analysisPattern = /预测|分析|未来|趋势|发展|变化|影响|关系|比较|评价|看法|观点|为什么|原因|意义|启示|对策|建议|方案|策略|如何|怎么|能否|是否|如果|假设|假如|设想|畅想|展望|推断|推理|论证|证明.*观点|谈谈|说说|看法/;
+            var isAnalysisQ = analysisPattern.test(t) && !stdPattern.test(t);
+            if (isAnalysisQ && d < 4) d = 4; /* 分析推理题最低 L4 */
             if (d >= 9 && !elitePattern.test(t) && stdPattern.test(t)) {
                 d = 8;  /* 标准题型不允许 L9+ */
             }
@@ -8510,24 +8532,35 @@ var IndoorRouter = (function () {
             /* ③ 对连续非中文/非全角标点的片段，若含数学特征则包裹 $...$ */
             s = s.replace(/[^\u4e00-\u9fff\u3000-\u303f\uff00-\uffef]+/g, function (run) {
                 var t = run;
-                var trimmed = t.trim();
-                if (trimmed.length < 2) return t;
+                /* 若该片段含受保护的公式占位符，需在占位符处拆分，分别包裹，
+                   避免包裹后出现 $...$F$...$ 畸形定界符 */
+                if (/\x00MATH~\d+~\x00/.test(t)) {
+                    var segs = t.split(/(\x00MATH~\d+~\x00)/);
+                    var out = "";
+                    for (var si = 0; si < segs.length; si++) {
+                        var seg = segs[si];
+                        if (/^\x00MATH~\d+~\x00$/.test(seg)) { out += seg; continue; }
+                        out += wrapMathSegment(seg);
+                    }
+                    return out;
+                }
+                return wrapMathSegment(t);
+            });
+            function wrapMathSegment(seg) {
+                var trimmed = seg.trim();
+                if (trimmed.length < 2) return seg;
                 /* 含 _ ^ { } \ 或 \command 则视为数学 */
                 var hasMath = /[_^{}\\]|\\[a-zA-Z]/.test(trimmed);
-                /* 变量+数字模式：如 b11, a1, CO2, H2O —— 1-2个字母紧跟数字，且变量前不是字母
-                   （避免 hello123、world123 等普通单词被误判） */
-                if (!hasMath) {
-                    hasMath = /(?:^|[^a-zA-Z])[a-zA-Z]{1,2}\d/.test(trimmed);
-                }
-                if (!hasMath) return t;
-                var lead = t.match(/^\s*/)[0];
-                var trail = t.match(/\s*$/)[0];
-                /* 变量+数字自动加下划线：b11→b_{11}, CO2→CO_{2}, b101→b_{101} */
+                /* 变量+数字模式：如 b11, a1, CO2, H2O */
+                if (!hasMath) hasMath = /(?:^|[^a-zA-Z])[a-zA-Z]{1,2}\d/.test(trimmed);
+                if (!hasMath) return seg;
+                var lead = seg.match(/^\s*/)[0];
+                var trail = seg.match(/\s*$/)[0];
                 var wrapped = trimmed.replace(/([a-zA-Z])(\d{1,3})/g, function (m, letter, num) {
                     return letter + "_{" + num + "}";
                 });
                 return lead + "$" + wrapped + "$" + trail;
-            });
+            }
             /* ④ 还原保护的数学块 */
             s = s.replace(/\x00MATH~(\d+)~\x00/g, function (_, i) {
                 return protectedParts[parseInt(i)];
@@ -8564,7 +8597,7 @@ var IndoorRouter = (function () {
                     /* 剥离首尾定界符 */
                     expr = expr.replace(/^\$\$?/, "").replace(/\$\$?$/, "").replace(/^\\\(/, "").replace(/\\\)$/, "").replace(/^\\\[/, "").replace(/\\\]$/, "");
                     try {
-                        html += window.katex.renderToString(expr, { displayMode: display, throwOnError: false, output: "html" });
+                        html += window.katex.renderToString(expr, { displayMode: display, throwOnError: false, errorColor: "#475569", output: "html" });
                     } catch (e) {
                         html += esc(raw); /* 渲染失败时显示原始文本 */
                     }
@@ -11096,6 +11129,7 @@ var IndoorRouter = (function () {
             });
             var subjects = Object.keys(subSet);
             var kps = Object.keys(kpSet);
+            var sourceTexts = items.map(function (it) { return it.text || it.question || ""; }).filter(Boolean);
             var targetDiff = Math.min(10, (maxDiff || 5) + 2);  /* 难度+2，封顶10 */
             var REVIEW_Q_COUNT = 3;  /* 每次恒定3道复习题 */
             /* 打开测验弹窗，显示加载中 */
@@ -11111,13 +11145,13 @@ var IndoorRouter = (function () {
                     var qs = quiz.questions.slice(0, REVIEW_Q_COUNT);
                     _wqReviewQuiz = { questions: qs, sourceItems: items, answers: [], current: 0, subjects: subjects };
                     renderWQReviewQuizQuestion();
-                });
+                }, sourceTexts);
             } else {
                 showWQReviewQuizError("分析未启用，无法生成复习题");
             }
         }
         /* AI生成复习选择题 */
-        function aiGenerateReviewQuiz(subjects, kps, diff, count, cb) {
+        function aiGenerateReviewQuiz(subjects, kps, diff, count, cb, sourceTexts) {
             var subj = (subjects && subjects.length) ? subjects.join("、") : "综合";
             var kpList = (kps && kps.length) ? kps.join("、") : "相关知识点";
             var n = Math.min(8, Math.max(3, count));
@@ -11129,11 +11163,18 @@ var IndoorRouter = (function () {
                 var recent = history.slice(-10).map(function (h) { return h.q; }).join("；");
                 historyTip = "\n【以下题目近期已出过，严禁重复或高度相似】\n" + recent;
             }
-            var sysPrompt = "你是一位出题专家。请基于以下知识点，生成 " + n + " 道全新的单项选择题（绝对不要复用任何已有题目，也不要与历史题目相似）。" +
-                "难度等级 " + diff + "（1-10级，数字越大越难）。" +
-                "每题若需要配图（如几何图形、电路图、物理装置、化学实验装置等），needImg设为true，imgDesc用一句话描述图的内容（如'正四面体电阻网络，每条棱接一个电阻R'）。不需要图则needImg为false。" +
+            /* 把错题原文作为锚点，确保推题精准关联 */
+            var anchorTip = "";
+            if (sourceTexts && sourceTexts.length) {
+                anchorTip = "\n【错题原文（推题必须紧扣这些题目涉及的知识点和领域，严禁出无关题目）】\n" +
+                    sourceTexts.map(function (t, i) { return (i + 1) + ". " + (t || "").slice(0, 200); }).join("\n");
+            }
+            var sysPrompt = "你是一位出题专家。请基于以下错题的知识点，生成 " + n + " 道全新的单项选择题。" +
+                "【核心要求】每道题必须紧扣错题涉及的知识点和领域，进行拓展、深化、探索，绝对不能出与错题无关的题目！" +
+                "难度等级 " + diff + "（1-10级，数字越大越难），在原题基础上提升难度，侧重变式迁移和拓展探究。" +
+                "每题若需要配图（如几何图形、电路图、物理装置、化学实验装置等），needImg设为true，imgDesc用一句话描述图的内容。不需要图则needImg为false。" +
                 "严格按JSON返回：{\"questions\":[{\"q\":\"题干\",\"options\":[\"A选项\",\"B选项\",\"C选项\",\"D选项\"],\"answer\":0,\"explain\":\"解析\",\"needImg\":false,\"imgDesc\":\"\"}]}。" +
-                "answer为正确选项的索引(0-3)。题干和选项要具体、有区分度，不要空话。" + historyTip;
+                "answer为正确选项的索引(0-3)。题干和选项要具体、有区分度，不要空话。" + anchorTip + historyTip;
             var messages = [
                 { role: "system", content: sysPrompt },
                 { role: "user", content: "学科：" + subj + "\n知识点：" + kpList + "\n请出题。" }
