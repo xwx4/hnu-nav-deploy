@@ -7830,25 +7830,7 @@ var IndoorRouter = (function () {
                 }
             }
 
-            /* LaTeX 修复：JSON.parse 把 \t\n\r\f\b 当控制字符，吃掉 LaTeX 反斜杠 */
-            function fixLatex(s) {
-                if (typeof s !== "string") return s;
-                /* 还原字面 \\n 等为真控制字符 */
-                s = s.replace(/\\r\\n/g, "\n").replace(/\\n/g, "\n").replace(/\\r/g, "\n").replace(/\\t/g, "\t").replace(/\\f/g, "\f").replace(/\\b/g, "\x08");
-                /* \b(退格)：退格符在正文里永远不合法，遇到 退格+字母 一律还原为 \字母
-                 * 覆盖 \bar \beta \boxed \because \big \binom \boldsymbol \backslash \begin \bf \bm 等 */
-                s = s.replace(/\x08([a-zA-Z])/g, "\\b$1");
-                /* \f(换页)：换页符在正文里永远不合法，遇到 换页+字母 一律还原为 \字母
-                 * 覆盖 \frac \forall \fbox \frak \phi \varphi \Phi \float 等 */
-                s = s.replace(/\f([a-zA-Z])/g, "\\f$1");
-                /* \t(制表)：制表符在数学正文里极罕见，遇到 制表+字母 还原为 \字母
-                 * 覆盖 \text \times \theta \tan \tanh \tfrac \tilde \triangle \to \top \tag \tau \textbf \textit \texttt 等 */
-                s = s.replace(/\t([a-zA-Z])/g, "\\t$1");
-                /* \n(换行)：换行是真分行，但 \r 已被转成 \n，所以 \rho\right 等也变成 换行+字母。
-                 * 只还原常见 LaTeX 命令（避免把真实换行后的首字母误判为命令） */
-                s = s.replace(/\n(rho|ight|angle|rightarrow|Rightarrow|ule|oman|ef|lceil|rceil|lfloor|rfloor|efref|efbox|efresh|oman|ot|otag|oindent|ull|umber|abla|u|ewcommand|ewline|ormalsize|otag|oindent|opagestyle|ocite|oindent|ewpage)/g, "\\n$1");
-                return s;
-            }
+            /* fixLatex 已提升为全局函数（供 renderRichText / aiFullPipeline 共用） */
 
             function parseMotherBlock(raw) {
                 var m = { text: "", answer: "", kpExplain: "", relation: "" };
@@ -8708,6 +8690,18 @@ var IndoorRouter = (function () {
                 var desc = markers[parseInt(i)] || "";
                 return imgDiagramHTML(desc, { subject: subject, width: 520, height: 360 });
             });
+            return s;
+        }
+
+        /* LaTeX 修复：JSON.parse 把 \t\n\r\f\b 当控制字符，吃掉 LaTeX 反斜杠。
+         * 提升为全局函数：供 aiFullPipeline 内部解析与 renderRichText 渲染共用。 */
+        function fixLatex(s) {
+            if (typeof s !== "string") return s;
+            s = s.replace(/\\r\\n/g, "\n").replace(/\\n/g, "\n").replace(/\\r/g, "\n").replace(/\\t/g, "\t").replace(/\\f/g, "\f").replace(/\\b/g, "\x08");
+            s = s.replace(/\x08([a-zA-Z])/g, "\\b$1");
+            s = s.replace(/\f([a-zA-Z])/g, "\\f$1");
+            s = s.replace(/\t([a-zA-Z])/g, "\\t$1");
+            s = s.replace(/\n(rho|ight|angle|rightarrow|Rightarrow|ule|oman|ef|lceil|rceil|lfloor|rfloor|efref|efbox|efresh|ot|otag|oindent|ull|umber|abla|u|ewcommand|ewline|ormalsize|opagestyle|ocite|ewpage)/g, "\\n$1");
             return s;
         }
 
