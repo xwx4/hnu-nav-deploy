@@ -6822,8 +6822,10 @@ var IndoorRouter = (function () {
                         var node = WQ_BANK[sub][kp];
                         var qs = (node.questions || []).slice();
                         for (var i = 0; i < qs.length; i++) {
-                            /* 精英化：只展示难度 ≥ bankMinDiff（高中顶级）的题 */
-                            if ((parseInt(qs[i].diff) || 0) < minDiff) continue;
+                            /* 精英化：内置题只展示难度 ≥ bankMinDiff（高中顶级）的题；
+                             * 用户/AI 贡献题（有 source）已在入库时校验过，全部展示，
+                             * 避免「已同步进来却看不到」的题库不同步问题 */
+                            if (!qs[i].source && (parseInt(qs[i].diff) || 0) < minDiff) continue;
                             /* 跳过被管理员删除的题（黑名单） */
                             if (this.isDeleted(qs[i].text)) continue;
                             all.push({
@@ -6844,12 +6846,21 @@ var IndoorRouter = (function () {
 
         /* 从服务端 KV 同步共享题库（Worker 自主更新的题目）
          * 调用 /api/wq/bank 获取共享题库，去重合并入 WQ_BANK */
-        function syncSharedBank() {
+        function syncSharedBank(retried) {
+            var done = false;
             try {
                 fetch("/api/wq/bank", { method: "GET" })
-                    .then(function (r) { return r.json(); })
+                    .then(function (r) {
+                        if (!r.ok) throw new Error("HTTP " + r.status);
+                        return r.json();
+                    })
                     .then(function (data) {
-                        if (!data || !data.bank) return;
+                        done = true;
+                        if (!data || !data.bank) {
+                            /* 后端返回错误（如 KV 未绑定时 data.error="KV namespace WQ_BANK_KV not bound"） */
+                            if (data && data.error) console.warn("[WQ] 共享题库同步失败：" + data.error);
+                            return;
+                        }
                         var shared = data.bank;
                         var added = 0;
                         for (var sub in shared) {
@@ -6877,12 +6888,14 @@ var IndoorRouter = (function () {
                                 }
                             }
                         }
-                        if (added > 0) {
-                            WQ_PIPELINE_B.log("从 KV 同步共享题库 " + added + " 道" + (data.meta ? "（更新于 " + new Date(data.meta.updated_at).toLocaleString("zh-CN") + "）" : ""));
-                            refreshWqBankStatus();
-                        }
+                        WQ_PIPELINE_B.log("共享题库同步完成：" + added + " 道新增" + (data.meta ? "（云端更新于 " + new Date(data.meta.updated_at).toLocaleString("zh-CN") + "）" : ""));
+                        if (added > 0) refreshWqBankStatus();
                     })
-                    .catch(function (e) { WQ_PIPELINE_B.log("KV 同步失败（可能未绑定 KV 命名空间）：" + e.message); });
+                    .catch(function (e) {
+                        console.warn("[WQ] KV 同步失败（可能未绑定 KV 命名空间）：" + (e && e.message ? e.message : e));
+                        /* 首次失败自动重试一次 */
+                        if (!retried && !done) setTimeout(function () { syncSharedBank(true); }, 2500);
+                    });
             } catch (e) { /* 同步失败不影响本地题库 */ }
         }
 
@@ -6909,29 +6922,24 @@ var IndoorRouter = (function () {
             });
         }
 
-        /* 刷新题库状态显示 */
+        /* 刷新题库状态显示
+         * 注意：必须与「题库浏览」列表采用同一口径（getAllQuestions），
+         * 否则会出现「显示 47 题、点进去只有 10 题」的不同步问题：
+         * 旧实现把每个知识点的 mother（母题）也计为 1 题，且未过滤 diff<7 的隐藏题。 */
         function refreshWqBankStatus() {
             var el = document.getElementById("wqBankStatus");
             if (!el) return;
-            /* 统计题库总题数 */
-            var total = 0, kpCnt = 0;
-            for (var sub in WQ_BANK) {
-                var sb = WQ_BANK[sub];
-                for (var kp in sb) {
-                    kpCnt++;
-                    var n = sb[kp];
-                    total += (n.questions ? n.questions.length : 0) + (n.mother ? 1 : 0);
-                }
+            var visible = [];
+            try { visible = WQ_PIPELINE_B.getAllQuestions(); } catch (e) { visible = []; }
+            var total = visible.length;
+            var kpMap = {};
+            var sharedCnt = 0;
+            for (var i = 0; i < visible.length; i++) {
+                if (visible[i].kp) kpMap[visible[i].kp] = 1;
+                if (visible[i].source && String(visible[i].source).indexOf("用户贡献") >= 0) sharedCnt++;
             }
-            var extraCnt = 0;
-            try {
-                var raw = localStorage.getItem("wq_bank_extra");
-                if (raw) {
-                    var extra = JSON.parse(raw);
-                    for (var s in extra) for (var k in extra[s]) extraCnt += (extra[s][k].questions || []).length;
-                }
-            } catch (e) {}
-            el.innerHTML = '📚 题库：<b>' + total + '</b> 题 / ' + kpCnt + ' 知识点 · 扩展库 ' + extraCnt + ' 题 · 上次更新 ' + WQ_PIPELINE_B.updateStatus();
+            var kpCnt = Object.keys(kpMap).length;
+            el.innerHTML = '📚 题库：<b>' + total + '</b> 题 / ' + kpCnt + ' 知识点 · 共享 ' + sharedCnt + ' 题 · 上次更新 ' + WQ_PIPELINE_B.updateStatus();
         }
 
         /* ================================================================
@@ -7437,6 +7445,8 @@ var IndoorRouter = (function () {
                 "【严格上限】常规求导/零点/参数范围/单调性/极值题≤8；只有竞赛题、需构造辅助函数、证明复杂不等式、组合计数等才给9；只有科研级开放题才给10。知识点要精准，2-4个。" +
                 "【timeSensitive 字段】若题目涉及体育赛事/明星动态/游戏版本/时事热点/政策法规/统计数据/未来预测/趋势分析/发展变化等可能随时间变化或需要最新数据支撑的内容，timeSensitive 设为 true，否则 false。" +
                 "【重要】返回的 JSON 中必须包含 \"text\" 字段：若有图片，text 为从图片中提取的完整题目原文（不要只写用户输入的指令）；若无图片，text 为用户输入的题目原文。" +
+                "【长图/聊天记录/材料文本】图片可能是很长的截图（聊天记录、对话、长文材料）。必须完整提取图内所有可见文字内容作为 text（保留对话双方与顺序），不得只提取其中一句，也不得声称「未提供材料」。若图内是一段对话/文章，text 就是这段对话/文章的完整原文，再据此分析其考查意图。" +
+                "【指令与材料区分】文本框输入若为分析要求（如「分析对话中人物性格」），它只是指令，不是题目材料；题目材料必须来自图片本身，text 必须是图片内容的完整原文。" +
                 "\n【多题检测（灵活判断）】仅当内容中存在多道彼此独立、各自有完整题干和答案的题目时才拆分。" +
                 "判断原则：① 对话/聊天记录/连续段落/阅读理解（含多个小问但共享同一材料）→ 视为【一道题】，不要拆分；" +
                 "② 只有出现明显题号（1. 2. 3. 或 (1)(2)(3) 或 一、二、三）且每道题题干完整、彼此无依赖时才拆分为多题；" +
@@ -7447,8 +7457,8 @@ var IndoorRouter = (function () {
                 /* 多模态：图片为主，文本为用户补充说明或分析指令 */
                 var suppText = (text || "").trim();
                 var hint = suppText
-                    ? "【用户补充/指令】用户在文本框中输入了以下内容，可能是对图片题目的补充说明、修正，或分析指令。请灵活理解：以图片内容为主，结合用户指令，完整识别并分析。\n用户输入：" + suppText
-                    : "请识别图片中的题目并分析。若图片有干扰信息（如界面元素、其他题目、聊天记录），请聚焦提取其中的学科题目内容。";
+                    ? "【补充指令（不是题目材料）】文本框内容仅作为分析的补充要求，请勿把它当作题目本身。\n补充指令：" + suppText + "\n\n【任务】请先完整提取图片中的全部文字材料（长截图可能包含多段内容，务必逐段读完、不要遗漏、不要声称「未提供材料」），再结合上述补充指令进行分析。返回 JSON 的 text 字段必须是图片材料的完整原文。"
+                    : "请识别图片中的题目并分析。若图片是长截图/聊天记录，请完整提取图内所有可见文字（不要只取一句，也不要声称未提供材料）；若图片有干扰信息（界面元素、其他题目），聚焦提取其中的学科内容。";
                 userContent = [{ type: "text", text: hint }];
                 imgList.forEach(function (iu) {
                     userContent.push({ type: "image_url", image_url: { url: iu } });
@@ -7625,6 +7635,7 @@ var IndoorRouter = (function () {
                 "5. 最后给出明确答案；\n" +
                 "6. 结尾点出本题最容易犯的错或最容易卡住的地方（一句话）。\n" +
                 "【核心原则】像老师在黑板上带着学生一步步做题，而不是从头讲新课。只注解本节课新学的、学生可能没掌握的关键点。绝对不要在讲解中出现「昏睡」「睡觉」「走神」等表述。\n" +
+                "【措辞纪律·重要】讲解中严禁出现任何暴露信息来源或指代上传者的措辞，例如「你未提供」「你给出的」「你上传的图片」「你没有说明」「根据你提供的信息」「由于你未提供…」等。若原题信息不完整，直接基于已有内容正常讲解，用「本题」「题目中的材料」来指代；绝对不要向学生抱怨缺少材料，也不要用教科书式示例替代原题。\n" +
                 "【数据真实性铁律】讲解中出现的所有数字、数值、条件、表格数据，必须严格、完整地来自原题本身，严禁自行编造、替换或举例说明时使用与原题无关的数据。若原题含表格/图表，必须提取并使用表中的真实数据进行计算，绝不允许用自己编的数字（如82、90、76、88）替代原题数据。\n" +
                 "【答案正确性自校】输出前请自检：①答案是否符合题目条件？②推理步骤是否每一步都成立？③是否有更优/更标准的解法？如有更优解法请直接采用最优解法。如发现错误请立即修正后再输出。\n" +
                 (hasSearch
@@ -8281,6 +8292,8 @@ var IndoorRouter = (function () {
                 img.onload = function () {
                     var w = img.width, h = img.height;
                     if (w > maxW) { h = Math.round(h * maxW / w); w = maxW; }
+                    /* 长截图限制高度上限，避免 canvas 过大；识别时仍会纵向切片保证可读 */
+                    if (h > 5000) { w = Math.round(w * 5000 / h); h = 5000; }
                     var canvas = document.createElement("canvas");
                     canvas.width = w; canvas.height = h;
                     var ctx = canvas.getContext("2d");
@@ -8960,52 +8973,119 @@ var IndoorRouter = (function () {
             t = t.replace(/\n{3,}/g, "\n\n");
             return t.trim();
         }
+        /* 超长图切片：长截图（聊天记录/长文本）若整体压缩，宽度会被压到几十像素，
+         * 视觉模型与 OCR 都无法识别。这里把长图按纵向切成若干接近方形的片段，
+         * 每片保留足够分辨率，识别后再按顺序拼接文字。
+         * 回调 cb(tiles: string[])；普通图片返回单元素数组。 */
+        function splitImageTiles(dataUrl, cb, maxTiles) {
+            var img = new Image();
+            img.onload = function () {
+                var w = img.width, h = img.height;
+                var MAX_TILES = Math.max(1, Math.min(9, maxTiles || 9));  /* 视觉接口单次图片数量上限 */
+                var ratio = h / Math.max(1, w);
+                /* 非长图：按最长边缩到 1600 以内即可 */
+                if (ratio <= 2.2) {
+                    var scale = Math.min(1, 1600 / Math.max(w, h));
+                    var cw = Math.round(w * scale), ch = Math.round(h * scale);
+                    var cv = document.createElement("canvas");
+                    cv.width = cw; cv.height = ch;
+                    cv.getContext("2d").drawImage(img, 0, 0, cw, ch);
+                    try { cb([cv.toDataURL("image/jpeg", 0.9)]); } catch (e) { cb([dataUrl]); }
+                    return;
+                }
+                /* 长图：每片高度约 1.6 倍宽度，片间 12% 重叠避免切断文字行 */
+                var tileH = Math.max(w * 1.6, 700);
+                var overlap = Math.round(tileH * 0.12);
+                var step = tileH - overlap;
+                var count = Math.ceil((h - overlap) / step);
+                if (count > MAX_TILES) {
+                    count = MAX_TILES;
+                    tileH = Math.ceil((h + (count - 1) * overlap) / count);
+                    step = tileH - overlap;
+                }
+                var outW = Math.min(w, 1400);
+                var outScale = outW / w;
+                var tiles = [];
+                for (var i = 0; i < count; i++) {
+                    var sy = i * step;
+                    var sh = Math.min(tileH, h - sy);
+                    if (sh <= 0) break;
+                    var tw = outW, th = Math.round(sh * outScale);
+                    var cvs = document.createElement("canvas");
+                    cvs.width = tw; cvs.height = th;
+                    var cx = cvs.getContext("2d");
+                    cx.drawImage(img, 0, sy, w, sh, 0, 0, tw, th);
+                    try { tiles.push(cvs.toDataURL("image/jpeg", 0.9)); }
+                    catch (e) { tiles.push(dataUrl); }
+                }
+                cb(tiles.length ? tiles : [dataUrl]);
+            };
+            img.onerror = function () { cb([dataUrl]); };
+            img.src = dataUrl;
+        }
+        /* 批量把 _wqImgs 展开成识别用切片（顺序保持）
+         * 总切片数控制在上限内：每张图分到的切片上限 = 9 / 图片数 */
+        function buildTilesFromImgs(imgs, cb) {
+            var tiles = [], idx = 0;
+            var perCap = Math.max(1, Math.floor(9 / Math.max(1, imgs.length)));
+            function next() {
+                if (idx >= imgs.length) { cb(tiles); return; }
+                splitImageTiles(imgs[idx], function (t) {
+                    tiles = tiles.concat(t);
+                    idx++;
+                    next();
+                }, perCap);
+            }
+            next();
+        }
         /* ---- OCR：调用 Tesseract.js 识别图片中的题目文字 ---- */
         function runWQOcr() {
             if (!_wqImgs.length) { showToast("请先上传错题图片"); return; }
             var ocrTip = document.getElementById("wqOcrTip");
-            if (ocrTip) { ocrTip.style.display = "block"; ocrTip.innerHTML = "🔄 图像预处理中…"; }
+            if (ocrTip) { ocrTip.style.display = "block"; ocrTip.innerHTML = "🔄 图像预处理中（长图自动切片）…"; }
             var ta = document.getElementById("wqText");
             if (typeof Tesseract === "undefined") {
                 if (ocrTip) ocrTip.innerHTML = "⚠ OCR 引擎未加载（网络可能受限），请手动输入题目";
                 return;
             }
-            /* 先做图像增强，再丢给 Tesseract；多图依次识别并拼接 */
-            var allText = "";
-            var imgIdx = 0;
-            function ocrNext() {
-                if (imgIdx >= _wqImgs.length) {
-                    if (allText.trim()) {
-                        if (ta) ta.value = allText.trim();
-                        if (ocrTip) ocrTip.innerHTML = "✅ 识别完成（共 " + allText.trim().length + " 字），已填入题目框，可编辑修正";
-                    } else {
-                        if (ocrTip) ocrTip.innerHTML = "⚠ 未识别到文字，请检查图片清晰度或手动输入";
-                    }
-                    return;
-                }
-                preprocessForOcr(_wqImgs[imgIdx], function (processed) {
-                    if (ocrTip) ocrTip.innerHTML = "🔄 OCR 识别中（第" + (imgIdx + 1) + "/" + _wqImgs.length + "张）…正在加载识别引擎";
-                    Tesseract.recognize(processed, "chi_sim+eng", {
-                        tessedit_pageseg_mode: "3",
-                        tessedit_ocr_engine_mode: "1",
-                        preserve_interword_spaces: "1",
-                        logger: function (m) {
-                            if (m.status && ocrTip) {
-                                var pct = m.progress ? Math.round(m.progress * 100) : "";
-                                ocrTip.innerHTML = "🔄 第" + (imgIdx + 1) + "张 " + m.status + (pct !== "" ? " " + pct + "%" : "");
-                            }
+            /* 先把长图切成可识别的片段，再逐片 OCR 拼接 */
+            buildTilesFromImgs(_wqImgs, function (tiles) {
+                var allText = "";
+                var imgIdx = 0;
+                function ocrNext() {
+                    if (imgIdx >= tiles.length) {
+                        if (allText.trim()) {
+                            if (ta) ta.value = allText.trim();
+                            if (ocrTip) ocrTip.innerHTML = "✅ 识别完成（共 " + allText.trim().length + " 字），已填入题目框，可编辑修正";
+                        } else {
+                            if (ocrTip) ocrTip.innerHTML = "⚠ 未识别到文字，请检查图片清晰度或手动输入";
                         }
-                    }).then(function (res) {
-                        var txt = (res && res.data && res.data.text) ? cleanOcrText(res.data.text) : "";
-                        if (txt) allText += (allText ? "\n" : "") + txt;
-                        imgIdx++;
-                        ocrNext();
-                    }).catch(function (e) {
-                        if (ocrTip) ocrTip.innerHTML = "⚠ 识别失败：" + (e && e.message ? e.message : e) + "，请手动输入";
+                        return;
+                    }
+                    preprocessForOcr(tiles[imgIdx], function (processed) {
+                        if (ocrTip) ocrTip.innerHTML = "🔄 OCR 识别中（第" + (imgIdx + 1) + "/" + tiles.length + "片）…";
+                        Tesseract.recognize(processed, "chi_sim+eng", {
+                            tessedit_pageseg_mode: "3",
+                            tessedit_ocr_engine_mode: "1",
+                            preserve_interword_spaces: "1",
+                            logger: function (m) {
+                                if (m.status && ocrTip) {
+                                    var pct = m.progress ? Math.round(m.progress * 100) : "";
+                                    ocrTip.innerHTML = "🔄 第" + (imgIdx + 1) + "片 " + m.status + (pct !== "" ? " " + pct + "%" : "");
+                                }
+                            }
+                        }).then(function (res) {
+                            var txt = (res && res.data && res.data.text) ? cleanOcrText(res.data.text) : "";
+                            if (txt) allText += (allText ? "\n" : "") + txt;
+                            imgIdx++;
+                            ocrNext();
+                        }).catch(function (e) {
+                            if (ocrTip) ocrTip.innerHTML = "⚠ 识别失败：" + (e && e.message ? e.message : e) + "，请手动输入";
+                        });
                     });
-                });
-            }
-            ocrNext();
+                }
+                ocrNext();
+            });
         }
 
         function runWQRecognize() {
@@ -9032,14 +9112,27 @@ var IndoorRouter = (function () {
             document.getElementById("wqAiResult").style.display = "block";
 
             /* === 学科/知识点/难度 全部由 AI 判断 === */
+            /* 纯文本秒级响应：12s 超时；含图片（长图切片+视觉识别较慢）放宽到 22s */
+            var _analyzeTimeoutMs = _wqImgs.length ? 22000 : 12000;
             var aiTimeout = setTimeout(function () {
                 /* AI 超时 → 规则兜底 */
                 console.warn("[WQ] AI 分析超时，切换规则兜底");
                 applyAnalysis({ subject: detectSubject(text), qtype: detectQType(text),
                     kps: detectKnowledgePoints(text, detectSubject(text)), diff: estimateDifficulty(text),
                     errorCause: detectErrorCause(text, detectQType(text), estimateDifficulty(text)), timeSensitive: isTimeSensitive(text) });
-            }, 12000);
+            }, _analyzeTimeoutMs);
 
+            /* 长图先切片再送视觉模型：整张长截图会被压缩到宽度几十像素，模型无法识别。
+             * 切片为纯本地 canvas 运算，几十毫秒完成，不影响秒级响应。 */
+            var _visionImgs = [];
+            if (!_wqImgs.length) {
+                doAnalyze([]);
+            } else {
+                buildTilesFromImgs(_wqImgs, function (tiles) { doAnalyze(tiles); });
+            }
+
+            function doAnalyze(visionImgs) {
+                _visionImgs = visionImgs || [];
             aiAnalyzeQuestion(text, function (err, aiResult) {
                 if (aiTimeout) { clearTimeout(aiTimeout); aiTimeout = null; }
                 if (err || !aiResult) {
@@ -9067,7 +9160,8 @@ var IndoorRouter = (function () {
                     diff: aiResult.diff, errorCause: aiResult.errorCause, timeSensitive: aiResult.timeSensitive,
                     text: aiResult.text
                 });
-            }, _wqImgs);
+            }, _visionImgs);
+            }
 
             /* 统一应用分析结果（AI 或规则兜底），然后渲染推题 */
             function applyAnalysis(res) {
@@ -11088,6 +11182,7 @@ var IndoorRouter = (function () {
                                     var lKp = (targetQ.kp && targetQ.kp.length) ? targetQ.kp[0] : "综合运用";
                                     WQ_PIPELINE_B.storeQuestion(localQ, lSub, lKp);
                                     WQ_PIPELINE_B.persistBank();
+                                    refreshWqBankStatus();
                                 } catch (e) {}
                                 showToast("⭐ 检验通过（综合" + finalScore.toFixed(2) + "），已上传共享题库！所有用户可见");
                             } else {
