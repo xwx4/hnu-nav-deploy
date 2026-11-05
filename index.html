@@ -5740,6 +5740,7 @@ var IndoorRouter = (function () {
         var _wqError = null;       // 当前选择的错因
         var _wqCritique = null;    // 题目质疑结果
         var _wqMastery = {};   // 推荐题掌握情况 {idx: true/false}
+        var _wqRecsDelivered = false; // 推荐题是否已成功交付（防止兜底覆盖好结果）
 
         /* ---- 学科关键词（用于学科判定） ---- */
         var WQ_SUBJECT_KW = {
@@ -7563,13 +7564,36 @@ var IndoorRouter = (function () {
             ];
             WQ_AI_ROUTER.call(messages, "recommend", function (err, res) {
                 if (err) { cb(err, null); return; }
-                var questions = [];
-                try {
-                    var m = res.text.match(/\[[\s\S]*\]/);
-                    if (m) questions = JSON.parse(m[0]);
-                } catch (e) {}
+                var questions = extractJsonArray(res.text || "");
                 cb(null, questions);
             });
+        }
+
+        /* 从文本中提取第一个完整的 JSON 数组（括号深度匹配，避免贪婪正则越界） */
+        function extractJsonArray(text) {
+            var arr = [];
+            var start = (text || "").indexOf('[');
+            if (start < 0) return arr;
+            var depth = 0, inStr = false, esc = false;
+            for (var i = start; i < text.length; i++) {
+                var c = text.charAt(i);
+                if (inStr) {
+                    if (esc) esc = false;
+                    else if (c === '\\') esc = true;
+                    else if (c === '"') inStr = false;
+                } else {
+                    if (c === '"') inStr = true;
+                    else if (c === '[') depth++;
+                    else if (c === ']') {
+                        depth--;
+                        if (depth === 0) {
+                            try { arr = JSON.parse(text.slice(start, i + 1)); } catch (e) {}
+                            break;
+                        }
+                    }
+                }
+            }
+            return Array.isArray(arr) ? arr : [];
         }
 
         /* ================================================================
@@ -7610,9 +7634,9 @@ var IndoorRouter = (function () {
                 "数学公式用LaTeX，如$x^2$、$\\frac{a}{b}$。配图必须准确应景、直接对应题目内容，在需要可视化辅助理解的位置插入 [IMG:描述]。描述要具体到画面要素（物体、位置、标注、场景），例如[IMG:正四面体ABCD，每条棱接电阻R，求AB间等效电阻]、[IMG:抛物线y=x²上有两点A(1,1)和B(2,4)，连接AB]。严禁配与题目无关的抽象图或装饰图。>\n\n" +
                 "##母题##\n题干：<追溯到该知识点最根本、最原型的母题题干，要有强母题性——能衍生出一类题的典型原型题>\n答案：<母题答案与解析，采用最优/最经典解法>\n知识点：<讲透母知识点：本质、定义、核心公式/定理、适用边界、常见误区，覆盖所有知识源，精当概括>\n演变：<原题如何从母题演变而来，说清变式路径>\n\n" +
                 "##推荐##\n<JSON数组，必须输出3道题，严禁省略！以原题知识点为根，进行拓展、深化、探索，严禁出与原题无关的题目>\n" +
-                '格式：[{"text":"题干（单行，不要换行）","answer":"答案","solution":"解析（采用最优解法）","diff":' + targetD + ',"layer":"基础|变式|拔高"}]\n' +
+                '格式：[{"text":"题干（表格数据可换行）","answer":"答案","solution":"解析（采用最优解法）","diff":' + targetD + ',"layer":"基础|变式|拔高"}]\n' +
                 "【难度铁律】3道题难度均为L" + targetD + "（=原题难度L" + d + "+1），必须是真·难度提升：①不能只是把原题拆成小问、不能只改数字、不能截取原题片段；②必须在原题基础上增加思维深度、步骤复杂度、综合性或开放性；③英语/语文阅读题必须使用全新的语篇材料（严禁截取原题段落），题目考查能力必须高于原题。\n" +
-                "3道题分层：①基础巩固（同知识点直接应用，但比原题多一步推理）②变式迁移（变形/换元/迁移/逆向）③拓展探究（深化/探索/跨知识点融合/开放性）。解析必须采用最优/最简洁的解法。题干必须单行输出，不要插入换行。\n\n" +
+                "3道题分层：①基础巩固（同知识点直接应用，但比原题多一步推理）②变式迁移（变形/换元/迁移/逆向）③拓展探究（深化/探索/跨知识点融合/开放性）。解析必须采用最优/最简洁的解法。题干中若含表格/数据列表，可用换行分行排列数据，使其清晰易读；纯文字题干保持紧凑单行。\n\n" +
                 "##END##";
             var messages = [
                 { role: "system", content: sysPrompt },
@@ -7670,11 +7694,10 @@ var IndoorRouter = (function () {
                             }
                             motherDone = true; stage = "recs";
                         }, 40000);
-                        /* 推荐题超时兜底：30s 未出则给空数组 */
+                        /* 推荐题超时兜底：45s 未出有效推荐题则触发补推（不设 recsDone，主管线仍可交付） */
                         recsTimer = setTimeout(function () {
                             if (!recsDone && cbs.onRecs) cbs.onRecs([]);
-                            recsDone = true; stage = "done";
-                        }, 30000);
+                        }, 45000);
                         /* 继续解析母题段 */
                         parseMotherAndRecs();
                     } else {
@@ -7722,12 +7745,15 @@ var IndoorRouter = (function () {
                         stage = "recs";
                     }
                 }
-                /* 推荐题段：需等 END 标记或流结束 */
-                if (rStart >= 0) {
+                /* 推荐题段：
+                 * - 秒级响应：##推荐## 出现后，每次增量都尝试解析 JSON，成功则立即回调（不等 END）
+                 * - 守卫：recsDone 后不再回调，避免 END/流结束时重复调用导致"一闪后失败" */
+                if (rStart >= 0 && !recsDone) {
                     var recsRaw = (endMark > rStart) ? acc.slice(rStart + 5, endMark) : acc.slice(rStart + 5);
-                    if (final || endMark > 0) {
+                    var recs = parseRecsBlock(recsRaw);
+                    /* 解析到有效推荐题立即回调（秒级呈现）；或 END/流结束时无论有无结果都回调一次 */
+                    if (recs.length || final || endMark > 0) {
                         if (recsTimer) { clearTimeout(recsTimer); recsTimer = null; }
-                        var recs = parseRecsBlock(recsRaw);
                         if (cbs.onRecs) cbs.onRecs(recs);
                         recsDone = true; stage = "done";
                     }
@@ -7739,14 +7765,18 @@ var IndoorRouter = (function () {
                 if (typeof s !== "string") return s;
                 /* 还原字面 \\n 等为真控制字符 */
                 s = s.replace(/\\r\\n/g, "\n").replace(/\\n/g, "\n").replace(/\\r/g, "\n").replace(/\\t/g, "\t").replace(/\\f/g, "\f").replace(/\\b/g, "\x08");
-                /* \t 开头命令：text/times/theta/tan/tanh/tfrac/tilde/triangle 等（不用\b，因\times10中s与1无间界） */
-                s = s.replace(/\t(ext|imes|heta|an|anh|frac|binom|op|riple|ag|ilde|wo|riangle)/g, "\\t$1");
-                /* \f 开头命令：frac/forall/loat 等 */
-                s = s.replace(/\f(rac|orall|loat)/g, "\\f$1");
-                /* \b(退格) 开头命令：beta/binom 等 */
-                s = s.replace(/\x08(eta|inom)/g, "\\b$1");
-                /* \n 开头命令：newcommand/newline/not/nu/nabla/null 等 */
-                s = s.replace(/\n(ewcommand|ewline|ot|ull|abla|umber)/g, "\\n$1");
+                /* \b(退格)：退格符在正文里永远不合法，遇到 退格+字母 一律还原为 \字母
+                 * 覆盖 \bar \beta \boxed \because \big \binom \boldsymbol \backslash \begin \bf \bm 等 */
+                s = s.replace(/\x08([a-zA-Z])/g, "\\b$1");
+                /* \f(换页)：换页符在正文里永远不合法，遇到 换页+字母 一律还原为 \字母
+                 * 覆盖 \frac \forall \fbox \frak \phi \varphi \Phi \float 等 */
+                s = s.replace(/\f([a-zA-Z])/g, "\\f$1");
+                /* \t(制表)：制表符在数学正文里极罕见，遇到 制表+字母 还原为 \字母
+                 * 覆盖 \text \times \theta \tan \tanh \tfrac \tilde \triangle \to \top \tag \tau \textbf \textit \texttt 等 */
+                s = s.replace(/\t([a-zA-Z])/g, "\\t$1");
+                /* \n(换行)：换行是真分行，但 \r 已被转成 \n，所以 \rho\right 等也变成 换行+字母。
+                 * 只还原常见 LaTeX 命令（避免把真实换行后的首字母误判为命令） */
+                s = s.replace(/\n(rho|ight|angle|rightarrow|Rightarrow|ule|oman|ef|lceil|rceil|lfloor|rfloor|efref|efbox|efresh|oman|ot|otag|oindent|ull|umber|abla|u|ewcommand|ewline|ormalsize|otag|oindent|opagestyle|ocite|oindent|ewpage)/g, "\\n$1");
                 return s;
             }
 
@@ -7771,12 +7801,8 @@ var IndoorRouter = (function () {
             }
 
             function parseRecsBlock(raw) {
-                var recs = [];
-                try {
-                    var m = raw.match(/\[[\s\S]*\]/);
-                    if (m) recs = JSON.parse(m[0]);
-                } catch (e) {}
-                if (!Array.isArray(recs)) return [];
+                var recs = extractJsonArray(raw);
+                if (!Array.isArray(recs) || !recs.length) return [];
                 recs = recs.filter(function (r) { return r && r.text; }).map(function (r) {
                     r.text = fixLatex(r.text).replace(/\r\n/g, "\n").replace(/\n{3,}/g, "\n\n").replace(/[ \t]+/g, " ").trim();
                     r.answer = fixLatex(r.answer);
@@ -7841,18 +7867,13 @@ var IndoorRouter = (function () {
             var messages = [
                 { role: "system", content: "你是一位" + (subject || "全科") + "命题专家。推题原则：以原题反映的知识点为基础，难度分10级（1最简单，10最难）。生成3道题，难度均为L" + realTarget + "（比原题难1级）。严格按JSON数组返回（不要其他文字）：[{\"text\":\"题干\",\"answer\":\"答案\",\"idea\":\"思路\",\"solution\":\"详细解答\",\"diff\":1-10}]" +
                 "\n【难度铁律】3道题难度必须是真·难度提升：①不能只是把原题拆成小问、不能只改数字、不能截取原题片段；②必须在原题基础上增加思维深度、步骤复杂度、综合性或开放性；③英语/语文阅读题必须使用全新的语篇材料（严禁截取原题段落），题目考查能力必须高于原题。" +
-                "\n3道题分层：①基础巩固（同知识点直接应用，但比原题多一步推理）②变式迁移（变形/换元/迁移/逆向）③拓展探究（深化/探索/跨知识点融合/开放性）。解析必须采用最优/最简洁的解法。题干必须单行输出，不要插入换行。" },
+                "\n3道题分层：①基础巩固（同知识点直接应用，但比原题多一步推理）②变式迁移（变形/换元/迁移/逆向）③拓展探究（深化/探索/跨知识点融合/开放性）。解析必须采用最优/最简洁的解法。题干中若含表格/数据列表，可用换行分行排列数据，使其清晰易读；纯文字题干保持紧凑单行。" },
                 { role: "user", content: "学科：" + (subject || "未确定") + "\n知识点：" + kpList + "\n原题：" + text + "\n原题难度：L" + (targetDiff || 5) + "，请生成3道难度为L" + realTarget + "（原题+1）的分层变式题。" }
             ];
             WQ_AI_ROUTER.call(messages, "generate", function (err, res) {
                 if (err) { cb(err, null); return; }
                 /* 解析 AI 返回的 JSON 题目数组 */
-                var questions = [];
-                try {
-                    var raw = res.text;
-                    var m = raw.match(/\[[\s\S]*\]/);
-                    if (m) questions = JSON.parse(m[0]);
-                } catch (e) { /* 解析失败，返回空 */ }
+                var questions = extractJsonArray(res.text || "");
                 /* 校验 + 标注 */
                 var valid = [];
                 for (var i = 0; i < questions.length; i++) {
@@ -8995,6 +9016,7 @@ var IndoorRouter = (function () {
 
             _wqOrigText = text;
             _wqMastery = {};
+            _wqRecsDelivered = false;
 
             /* === 立即展示结果面板骨架，学科/知识点由 AI 判断（显示分析中占位） === */
             var _backBtn = document.getElementById("wqBackToList");
@@ -9091,6 +9113,7 @@ var IndoorRouter = (function () {
             _wqError = detectErrorCause(text, _wqQtype, _wqDiff);
             _wqCritique = critiqueQuestion(text, _wqQtype);
             _wqMastery = {};
+            _wqRecsDelivered = false;
             var _backBtn = document.getElementById("wqBackToList");
             if (_backBtn) _backBtn.style.display = "none";
             var subjText = document.getElementById("wqSubjectText");
@@ -9200,6 +9223,7 @@ var IndoorRouter = (function () {
             _wqError = q.errorCause || detectErrorCause(q.text, _wqQtype, _wqDiff);
             _wqCritique = critiqueQuestion(q.text, _wqQtype);
             _wqMastery = {};
+            _wqRecsDelivered = false;
             /* 多题模式显示返回题目列表按钮 */
             var backBtn = document.getElementById("wqBackToList");
             if (backBtn) backBtn.style.display = "inline-block";
@@ -9301,16 +9325,24 @@ var IndoorRouter = (function () {
                     }
                 },
                 onRecs: function (recs) {
-                    q.recs = recs;
-                    if (idx === _wqActiveMultiIdx && window._paintRecs) window._paintRecs(recs);
-                    /* 兜底：主管线推荐为空时，单独调用 AI 补推 */
-                    if ((!recs || !recs.length) && WQ_AI_CONFIG.enabled) {
-                        var mTargetDiff = Math.min(10, (q.diff || 5) + 1);
-                        aiRecommendQuestions(q.text, q.subject, q.kps, mTargetDiff, function (err, fbRecs) {
-                            if (err || !fbRecs || !fbRecs.length) return;
-                            q.recs = fbRecs;
-                            if (idx === _wqActiveMultiIdx && window._paintRecs) window._paintRecs(fbRecs);
-                        });
+                    if (recs && recs.length) {
+                        /* 有效推荐题：缓存并展示，标记已交付 */
+                        _wqRecsDelivered = true;
+                        q.recs = recs;
+                        if (idx === _wqActiveMultiIdx && window._paintRecs) window._paintRecs(recs);
+                    } else if (!_wqRecsDelivered) {
+                        /* 仅在从未收到有效题时兜底，避免覆盖已展示的好结果 */
+                        q.recs = recs;
+                        if (idx === _wqActiveMultiIdx && window._paintRecs) window._paintRecs(recs);
+                        if (WQ_AI_CONFIG.enabled) {
+                            var mTargetDiff = Math.min(10, (q.diff || 5) + 1);
+                            aiRecommendQuestions(q.text, q.subject, q.kps, mTargetDiff, function (err, fbRecs) {
+                                if (_wqRecsDelivered) return; /* 主管线已交付则不覆盖 */
+                                if (err || !fbRecs || !fbRecs.length) return;
+                                q.recs = fbRecs;
+                                if (idx === _wqActiveMultiIdx && window._paintRecs) window._paintRecs(fbRecs);
+                            });
+                        }
                     }
                 },
                 onDone: function () {
@@ -10074,17 +10106,20 @@ var IndoorRouter = (function () {
                                 }
                             }
                             if (aiRecs.length) {
-                                /* 严格只展示 AI 生成的推荐题，不混入题库 */
+                                /* 收到有效推荐题：展示并标记已交付，后续空结果不再覆盖 */
+                                _wqRecsDelivered = true;
                                 paintRecs(aiRecs.slice(0, 6));
-                            } else {
-                                /* 兜底：主管线推荐解析失败/为空时，单独调用 AI 补推 3 道，保证分层推题必有结果 */
+                            } else if (!_wqRecsDelivered) {
+                                /* 仅在从未收到有效推荐题时才触发兜底，避免覆盖已展示的好结果 */
                                 var recEl = document.getElementById("wqRecList");
                                 if (recEl) recEl.innerHTML = '<div style="color:#6366f1;padding:16px;text-align:center;font-size:13px">🔄 正在生成分层推荐题…</div>';
                                 aiRecommendQuestions(origText, sub, _wqKps, targetDiff, function (err, fallbackRecs) {
                                     if (err || !fallbackRecs || !fallbackRecs.length) {
-                                        if (recEl) recEl.innerHTML = '<div style="color:#94a3b8;padding:16px;text-align:center;font-size:13px">暂无推荐题，请稍后重试</div>';
+                                        if (recEl && !_wqRecsDelivered) recEl.innerHTML = '<div style="color:#94a3b8;padding:16px;text-align:center;font-size:13px">暂无推荐题，请稍后重试</div>';
                                         return;
                                     }
+                                    /* 兜底结果返回时若主管线已交付有效题，则不覆盖 */
+                                    if (_wqRecsDelivered) return;
                                     var fb = fallbackRecs.map(function (rq) {
                                         var rText = (rq.text || "").replace(/\r\n/g, "\n").replace(/\n{3,}/g, "\n\n").replace(/[ \t]+/g, " ").trim();
                                         return {
