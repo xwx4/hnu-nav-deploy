@@ -7703,7 +7703,7 @@ var IndoorRouter = (function () {
                 searchBlock +
                 "数学公式用LaTeX，如$x^2$、$\\frac{a}{b}$。配图必须准确应景、直接对应题目内容，在需要可视化辅助理解的位置插入 [IMG:描述]。描述要具体到画面要素（物体、位置、标注、场景），例如[IMG:正四面体ABCD，每条棱接电阻R，求AB间等效电阻]、[IMG:抛物线y=x²上有两点A(1,1)和B(2,4)，连接AB]。严禁配与题目无关的抽象图或装饰图。>\n\n" +
                 "##母题##\n题干：<追溯到该知识点最根本、最原型的母题题干，要有强母题性——能衍生出一类题的典型原型题>\n答案：<母题答案与解析，采用最优/最经典解法>\n知识点：<讲透母知识点：本质、定义、核心公式/定理、适用边界、常见误区，覆盖所有知识源，精当概括>\n演变：<原题如何从母题演变而来，说清变式路径>\n\n" +
-                "##推荐##\n<JSON数组，必须输出3道题，严禁省略！以原题知识点为根，进行拓展、深化、探索，严禁出与原题无关的题目>\n" +
+                "##推荐##\n<JSON数组，必须输出3道题，严禁省略！以原题的【母知识点】为根进行拓展、深化、探索——先回到该题最本质的知识点，再沿此知识点向外延伸（如：由特殊到一般、由低维到高维、由单一到综合、由封闭到开放），严禁出与原题无关的题目。3道题必须覆盖不同的拓展方向，体现「知识点→变式→深化→探索」的递进。>\n" +
                 '格式：[{"text":"题干（表格数据可换行）","answer":"答案","solution":"解析（采用最优解法）","diff":' + targetD + ',"layer":"基础|变式|拔高"}]\n' +
                 "【难度铁律】3道题难度均为L" + targetD + "（=原题难度L" + d + "+1），必须是真·难度提升：①不能只是把原题拆成小问、不能只改数字、不能截取原题片段；②必须在原题基础上增加思维深度、步骤复杂度、综合性或开放性；③英语/语文阅读题必须使用全新的语篇材料（严禁截取原题段落），题目考查能力必须高于原题。\n" +
                 "3道题分层：①基础巩固（同知识点直接应用，但比原题多一步推理）②变式迁移（变形/换元/迁移/逆向）③拓展探究（深化/探索/跨知识点融合/开放性）。解析必须采用最优/最简洁的解法，直接给最终正确解法，严禁出现「不对/错了/改为」等自我纠错痕迹；代码类题目的代码必须用 ```语言 围栏并保留缩进，代码内不要使用 $...$。3道题之间必须完全不同，严禁出现两道雷同题。题干中若含表格/数据列表，可用换行分行排列数据，使其清晰易读；纯文字题干保持紧凑单行。\n\n" +
@@ -10218,9 +10218,19 @@ var IndoorRouter = (function () {
                     if (dup) continue;
                     seenTexts.push(rq0.text);
                     rq0.diff = minRecDiff;
+                    /* 质量评分：用于"择优取3"——答案+解析越完整、层级越明确、与原题差异越大，分越高 */
+                    var qScore = 0;
+                    if (rq0.answer && String(rq0.answer).trim().length > 1) qScore += 2;
+                    if (rq0.solution && String(rq0.solution).trim().length > 5) qScore += 3;
+                    if (rq0.idea && String(rq0.idea).trim().length > 2) qScore += 1;
+                    if (rq0._layer) qScore += 1;
+                    qScore += (1 - Math.min(1, textSim(origText || "", rq0.text))) * 2; /* 与原题差异越大越好 */
+                    rq0._qScore = qScore;
                     cleanRecs.push(rq0);
                 }
-                recsArr = cleanRecs;
+                /* 择优：后台可跑多道，此处只取质量最高的 3 道 */
+                cleanRecs.sort(function (a, b) { return (b._qScore || 0) - (a._qScore || 0); });
+                recsArr = cleanRecs.slice(0, 3);
                 var ls = { low: [], mid: [], high: [], top: [] };
                 for (var rr = 0; rr < recsArr.length; rr++) {
                     var dd = recsArr[rr].diff || 1;
@@ -10286,7 +10296,7 @@ var IndoorRouter = (function () {
                                 _recFallbackBusy = false;
                                 if (!err && fb && fb.length) {
                                     _wqRecsDelivered = true;
-                                    paintRecs(fb.slice(0, 6));
+                                    paintRecs(fb.slice(0, 3));
                                 } else if (!_wqRecsDelivered && el) {
                                     el.innerHTML = '<div style="color:#94a3b8;padding:16px;text-align:center;font-size:13px">分层推荐题生成失败，请点击「重新分析」重试</div>';
                                 }
@@ -10295,8 +10305,73 @@ var IndoorRouter = (function () {
                     }
                 }
             }
+
+            /* ============ 题库同类题（依托现有题库，与 AI 分层推荐相互独立） ============ */
+            function paintBankRecs(bankRecsArr) {
+                var el = document.getElementById("wqBankRecList");
+                if (!el) return;
+                if (!bankRecsArr || !bankRecsArr.length) {
+                    el.innerHTML = '<div style="color:#9ca3af;padding:12px;text-align:center;font-size:12px">题库中暂无该知识点的同类题</div>';
+                    return;
+                }
+                /* 去重 + 排除与原题/AI推荐题高度雷同的题 */
+                var aiTexts = [];
+                try {
+                    var aiList = document.getElementById("wqRecList");
+                    if (aiList) {
+                        var cards = aiList.querySelectorAll(".wq-rec-q-text");
+                        for (var ci = 0; ci < cards.length; ci++) aiTexts.push(cards[ci].textContent || "");
+                    }
+                } catch (e) {}
+                var seen = [], clean = [];
+                for (var bi = 0; bi < bankRecsArr.length; bi++) {
+                    var bq = bankRecsArr[bi];
+                    if (!bq || !bq.text) continue;
+                    if (textSim(origText || "", bq.text) > 0.6) continue; /* 排除与原题雷同 */
+                    var dup = false;
+                    for (var si2 = 0; si2 < seen.length; si2++) {
+                        if (textSim(bq.text, seen[si2]) > 0.85) { dup = true; break; }
+                    }
+                    if (dup) continue;
+                    for (var ai = 0; ai < aiTexts.length; ai++) {
+                        if (textSim(bq.text, aiTexts[ai]) > 0.8) { dup = true; break; }
+                    }
+                    if (dup) continue;
+                    seen.push(bq.text);
+                    clean.push(bq);
+                }
+                clean = clean.slice(0, 5); /* 题库同类题最多展示 5 道 */
+                if (!clean.length) {
+                    el.innerHTML = '<div style="color:#9ca3af;padding:12px;text-align:center;font-size:12px">题库中暂无该知识点的同类题</div>';
+                    return;
+                }
+                var bh = '<div class="wq-layer wq-layer-basic"><div class="wq-layer-head"><span class="wq-layer-title">📖 题库同类题</span>' +
+                    '<span class="wq-layer-tip">来自现有题库的同知识点题目</span></div>';
+                for (var qi2 = 0; qi2 < clean.length; qi2++) {
+                    var q2 = clean[qi2];
+                    var qidx2 = sub + "_bank_" + qi2;
+                    var qText2 = (q2.text || "").replace(/\r\n/g, "\n").replace(/\n{3,}/g, "\n\n").replace(/[ \t]+/g, " ").trim();
+                    var srcBadge = '<span class="wq-transfer-tag" style="background:#0891b2" title="题库来源">📚 ' + esc(q2.source || "内置") + '</span>';
+                    bh += '<div class="wq-rec-card">' +
+                        '<div class="wq-rec-q">' +
+                            '<span class="wq-rec-q-text" style="line-height:1.8">' + renderRichText(qText2, sub, true) + '</span>' +
+                            '<span class="wq-rec-q-meta">' +
+                                '<span class="wq-rec-diff">' + wqDiffBar(q2.diff) + '</span>' + srcBadge +
+                            '</span>' +
+                        '</div>';
+                    if (q2.kp && q2.kp.length) bh += '<div class="wq-rec-kps">' + q2.kp.map(function (k) { return '<span class="wq-kp-tag small">' + esc(k) + '</span>'; }).join("") + '</div>';
+                    bh += renderSolutionParts(q2);
+                    bh += '<button class="wq-toggle-sol" onclick="var s=this.previousElementSibling;s.style.display=s.style.display===\'block\'?\'none\':\'block\';this.textContent=s.style.display===\'block\'?\'▼ 收起解析\':\'▶ 查看解析\'">▶ 查看解析</button>';
+                    bh += '</div>';
+                }
+                bh += '</div>';
+                el.innerHTML = bh;
+            }
             window._paintRecs = paintRecs; /* 暴露给多题切换时缓存重渲染 */
-            paintRecs(recs);
+            window._paintBankRecs = paintBankRecs;
+            /* 分层推荐由 AI 生成（初始为空，AI 返回后填充）；题库同类题从现有题库即时匹配 */
+            paintRecs([]);
+            paintBankRecs(recs);
 
             /* ---- 一站式智能分析（流式）：讲解→母题→推荐题 逐段秒级呈现 ---- */
             /* 多题模式下由 analyzeMultiQuestion 统一调度 pipeline，此处跳过避免重复 */
@@ -10381,7 +10456,7 @@ var IndoorRouter = (function () {
                                 }
                             }
                             if (aiRecs.length >= 3) {
-                                /* 足量推荐题（≥3）：直接展示并标记已交付 */
+                                /* 足量推荐题（≥3）：择优展示 3 道并标记已交付 */
                                 _wqRecsDelivered = true;
                                 paintRecs(aiRecs.slice(0, 6));
                             } else {
@@ -19284,6 +19359,8 @@ body.fire-mode #fireOverlay{display:flex}
       <div id="wqMother"></div>
       <div class="wq-rec-title">📚 分层推荐</div>
       <div class="wq-rec-list" id="wqRecList"></div>
+      <div class="wq-rec-title">📖 题库同类题</div>
+      <div class="wq-rec-list" id="wqBankRecList"></div>
       <div class="wq-tip-box" id="wqTipBox"></div>
     </div>
 
