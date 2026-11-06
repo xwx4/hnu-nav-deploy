@@ -8129,18 +8129,19 @@ var IndoorRouter = (function () {
             var subName = subject || "全科";
             /* 分层推题只认 AI 生成：绝不使用题库兜底（题库同类题不再混入分层推荐） */
             /* 同一道题的成功结果缓存：再次分析时直接秒开，不再等 AI */
-            var cacheKey = "wq_rec_" + wqTextHash(text) + "_" + target;
+            var cacheKey = "wq_rec3_" + wqTextHash(text) + "_" + target;
             var cached = wqLoadRecCache(cacheKey);
 
             if (!WQ_AI_CONFIG.enabled) {
                 cb(new Error("ai_disabled"), cached || null);
                 return;
             }
-            /* 命中缓存：先秒级交付，AI 不再重复生成 */
-            if (cached && cached.length) {
+            /* 命中缓存：只认「三档齐全」的结果；残缺缓存直接作废重生成，绝不拿旧结果糊弄 */
+            if (cached && cached.length >= 3) {
                 cb(null, cached);
                 return;
             }
+            if (cached && cached.length) { try { localStorage.removeItem(cacheKey); } catch (e) {} }
 
             var aiQs = [], delivered = false, aiFinished = false, hardFired = false, topUpStarted = false;
             /* 缺档兜底：无论两批是否都结束，只要过了红线还不满三道，就立刻用 AI 补缺失档位 */
