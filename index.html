@@ -8364,7 +8364,7 @@ var IndoorRouter = (function () {
             /* 不足三道：后台只补缺失档位（全部来自 AI，绝不使用题库） */
             function topUp(tries) {
                 tries = tries || 0;
-                if (aiQs.length >= 3 || tries >= 2) return;
+                if (aiQs.length >= 3 || tries >= 5) return;
                 var have = {};
                 aiQs.forEach(function (q) { if (q._tierKey) have[q._tierKey] = 1; });
                 var miss = WQ_REC_TIERS.filter(function (t) { return !have[t.key]; });
@@ -8378,7 +8378,8 @@ var IndoorRouter = (function () {
                         var sg = sigOf(merged);
                         if (sg !== lastSig) { lastSig = sg; cb(null, merged); }
                     }
-                    if (aiQs.length < 3) setTimeout(function () { topUp(tries + 1); }, 80);
+                    /* 网关拥塞时按退避重试，直到三档补齐（仍然只走 AI） */
+                    if (aiQs.length < 3) setTimeout(function () { topUp(tries + 1); }, Math.min(8000, 1200 * Math.pow(2, tries)));
                 }, "generate");
             }
             function onPartialBatch(bid, qs) {
