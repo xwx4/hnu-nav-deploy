@@ -5874,7 +5874,8 @@ var IndoorRouter = (function () {
                 { name: "文言文", keywords: ["文言文", "翻译", "实词", "虚词", "句式", "之乎者也"] },
                 { name: "现代文阅读", keywords: ["阅读", "理解", "概括", "分析", "鉴赏", "表达技巧", "主旨"] },
                 { name: "语言文字运用", keywords: ["成语", "病句", "标点", "修辞", "连贯", "得体", "仿写"] },
-                { name: "写作", keywords: ["作文", "写作", "立意", "论据", "论证", "议论文", "记叙文"] },
+                { name: "观点评价", keywords: ["你的看法", "你的观点", "谈谈你的看法", "是否同意", "怎么看", "如何理解", "评析", "辨析", "驳斥", "论证方法", "论据使用", "观点评价", "有人认为", "最强", "最好", "最优", "最厉害"] },
+                { name: "写作", keywords: ["作文", "写作", "立意", "论据", "论证", "议论文", "记叙文", "观点", "看法", "评价", "辨析", "理由"] },
                 { name: "文学常识", keywords: ["西游记", "红楼梦", "三国演义", "水浒传", "四大名著", "孙悟空", "猪八戒", "唐僧", "贾宝玉", "林黛玉", "诸葛亮", "曹操", "刘备", "关羽", "鲁迅", "李白", "杜甫", "作者", "名著", "文学"] }
             ],
             "生物": [
@@ -7238,13 +7239,32 @@ var IndoorRouter = (function () {
                 var provider = providers[0];
                 var models = self.selectModels(taskType);
                 var idx = 0;
+                var emitted = false, lastAcc = "", settled = false;
+                function forward(acc, delta) {
+                    if (!acc) return;
+                    emitted = true;
+                    lastAcc = acc;
+                    onChunk(acc, delta);
+                }
+                function finish(err, res) {
+                    if (settled) return;
+                    settled = true;
+                    cb(err, res);
+                }
                 function tryNext() {
-                    if (idx >= models.length) { cb(new Error("all_models_failed"), null); return; }
+                    if (idx >= models.length) {
+                        /* 已经流过内容：以已展示的内容收尾，绝不回退成失败 */
+                        if (emitted) { finish(null, { provider: provider.name, text: lastAcc }); return; }
+                        finish(new Error("all_models_failed"), null);
+                        return;
+                    }
                     var model = models[idx++];
-                    self._callStream(provider, messages, model, onChunk, function (err, fullText) {
-                        if (!err && fullText != null) { cb(null, { provider: provider.name, text: fullText }); return; }
+                    self._callStream(provider, messages, model, forward, function (err, fullText) {
+                        if (!err && fullText != null) { finish(null, { provider: provider.name, text: fullText }); return; }
                         console.warn("[AI Router] stream model " + model + " failed: " + (err && err.message) + ", trying fallback…");
-                        tryNext();
+                        /* 已经展示给用户的内容绝不换模型重来（否则两种说法来回闪烁） */
+                        if (emitted) { finish(null, { provider: provider.name, text: lastAcc }); return; }
+                        setTimeout(tryNext, 60);
                     });
                 }
                 tryNext();
@@ -7260,47 +7280,59 @@ var IndoorRouter = (function () {
                     stream: true,
                     reasoning_effort: "none"
                 };
-                var timedOut = false;
-                var timer = setTimeout(function () {
-                    timedOut = true;
-                    cb(new Error("timeout"), null);
-                }, WQ_AI_CONFIG.timeout);
+                var timedOut = false, finished = false, fullAcc = "", timer = null;
+                /* 回调只允许一次：避免"超时"与"晚到成功"双回调，导致讲解内容来回切换 */
+                function finish(err, text) {
+                    if (finished) return;
+                    finished = true;
+                    if (timer) { clearTimeout(timer); timer = null; }
+                    cb(err, text);
+                }
+                /* 空闲超时：每收到一段内容就重置，长讲解不会被固定短超时一刀切 */
+                function armTimer() {
+                    if (timer) clearTimeout(timer);
+                    timer = setTimeout(function () {
+                        if (fullAcc) { finish(null, fullAcc); return; }  /* 已有内容：平滑收尾，不换模型重来 */
+                        timedOut = true;
+                        finish(new Error("timeout"), null);
+                    }, WQ_AI_CONFIG.streamIdleTimeout || 60000);
+                }
+                armTimer();
 
                 fetch(url, {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify(payload)
                 }).then(function (r) {
-                    if (timedOut) return;
-                    clearTimeout(timer);
+                    if (finished) return;
                     if (!r.ok) throw new Error("HTTP " + r.status);
                     /* 如果响应不是 SSE，直接当 JSON 处理（某些上游不支持 stream） */
                     var ct = r.headers.get("content-type") || "";
                     if (ct.indexOf("text/event-stream") < 0) {
                         return r.json().then(function (data) {
+                            if (finished) return;
                             var text = (data && (data.text || data.answer || (data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content))) || "";
-                            if (text && onChunk) onChunk(text, text);
-                            cb(null, text);
+                            if (text) { fullAcc = text; if (onChunk) onChunk(text, text); }
+                            finish(null, text);
                         });
                     }
                     var reader = r.body.getReader();
                     var decoder = new TextDecoder();
                     var buffer = "";
-                    var fullText = "";
                     function read() {
-                        if (timedOut) return;
+                        if (finished) return;
                         reader.read().then(function (result) {
-                            if (timedOut) return;
+                            if (finished) return;
                             if (result.done) {
                                 /* 流结束但没解析到内容：尝试把 buffer 当 JSON 解析（上游可能没发 data: 前缀） */
-                                if (!fullText && buffer.trim()) {
+                                if (!fullAcc && buffer.trim()) {
                                     try {
                                         var obj = JSON.parse(buffer.trim());
                                         var c = obj.choices && obj.choices[0] && obj.choices[0].message && obj.choices[0].message.content;
-                                        if (c) { fullText = c; if (onChunk) onChunk(c, c); }
+                                        if (c) { fullAcc = c; if (onChunk) onChunk(c, c); }
                                     } catch (e) {}
                                 }
-                                cb(null, fullText);
+                                finish(null, fullAcc);
                                 return;
                             }
                             buffer += decoder.decode(result.value, { stream: true });
@@ -7315,22 +7347,23 @@ var IndoorRouter = (function () {
                                     var obj = JSON.parse(data);
                                     var delta = obj.choices && obj.choices[0] && obj.choices[0].delta && obj.choices[0].delta.content;
                                     if (delta) {
-                                        fullText += delta;
-                                        if (onChunk) onChunk(fullText, delta);
+                                        fullAcc += delta;
+                                        armTimer();
+                                        if (onChunk) onChunk(fullAcc, delta);
                                     }
                                 } catch (e) { /* 忽略解析异常的 chunk */ }
                             }
                             read();
                         }).catch(function (e) {
-                            if (timedOut) return;
-                            cb(e, null);
+                            if (finished) return;
+                            /* 已流出内容：保留现有内容收尾，绝不重来 */
+                            finish(fullAcc ? null : e, fullAcc || null);
                         });
                     }
                     read();
                 }).catch(function (e) {
-                    if (timedOut) return;
-                    clearTimeout(timer);
-                    cb(e, null);
+                    if (finished) return;
+                    finish(e, null);
                 });
             },
 
@@ -7472,6 +7505,8 @@ var IndoorRouter = (function () {
                 "生物医学（基因编辑、细胞、药物、免疫等）属于生物；" +
                 "科普类题目只要涉及具体学科知识就归入该学科，不要因为像科普就判其他。" +
                 "【只有纯闲聊、脑筋急转弯、无学科内容的题目才返回「其他」】。拿不准时选最接近的学科。" +
+                "【观点/看法/评价/论述类】如「有人认为……你怎么看」「谈谈你的看法」「是否同意」，一律归语文，题型为观点评价题，知识点取议论文相关（如 观点评价、论证方法、论据使用）。" +
+                "【kps 禁止占位】不得返回「无学科内容」「无」「未知」「其他」这类占位词；必须给出 2-4 个具体可教可练的知识点名称。" +
                 "难度说明（全人类认知深度10级，严格校准，宁低勿高）：" +
                 "1=概念识记(背定义/公式)，2=直接套用(代入公式一步出答案)，3=简单综合(2-3知识点直接应用)，" +
                 "4=变式应用(需变形/换元)，5=方法迁移(选方法+多步计算)，6=多步推理(3步以上逻辑链)，" +
@@ -7987,16 +8022,28 @@ var IndoorRouter = (function () {
                 return;
             }
 
-            var aiQs = [], delivered = false, aiDelivered = false;
-            /* 8 秒红线：AI 仍未出结果则先用本地题库/训练任务兜底，绝不长时间空白 */
+            var aiQs = [], delivered = false, aiFinished = false, hardFired = false;
+            /* 8 秒红线：已有内容就先展示；完全没内容则继续等，骨架屏不闪 */
             var guard = setTimeout(function () {
                 if (delivered) return;
+                var partial = mergeWQRecs(aiQs, localRecs, text, target);
+                if (!partial.length) return;
                 delivered = true;
-                cb(null, mergeWQRecs(aiQs, localRecs, text, target));
+                cb(null, partial);
             }, 8000);
+            /* 20 秒硬截止：仍未出题则展示可重试状态，绝不无限转圈；AI 晚到仍会静默补齐 */
+            var hardGuard = setTimeout(function () {
+                if (hardFired) return;
+                hardFired = true;
+                delivered = true;
+                clearTimeout(guard);
+                cb(null, mergeWQRecs(aiQs, localRecs, text, target));
+            }, 20000);
 
-            /* 首屏秒开：立即用本地题库/训练任务铺满三道，AI 结果到达后再无缝替换 */
-            setTimeout(function () { cb(null, mergeWQRecs([], localRecs, text, target)); }, 0);
+            /* 首屏秒开：只有本地题库真有同知识点题时才立即铺，避免先闪一下"没有题目" */
+            if (localRecs.length) {
+                setTimeout(function () { cb(null, mergeWQRecs([], localRecs, text, target)); }, 0);
+            }
 
             function normalize(obj, tier, provider) {
                 if (!obj || !obj.text) return null;
@@ -8101,15 +8148,16 @@ var IndoorRouter = (function () {
 
             var pending = 2, retried = false, retryTasks = ["analyze", "generate"], retryIdx = 0, retrying = false;
             function finishFirst() {
-                /* AI 结果只升级一次；即使 8 秒红线已先兜底，AI 晚到仍静默替换 */
-                if (aiDelivered) return;
-                aiDelivered = true;
+                /* AI 结果只升级一次；即使 8 秒红线已先兜底、20 秒已显示重试，AI 晚到仍静默补齐 */
+                if (aiFinished) return;
+                aiFinished = true;
                 delivered = true;
                 clearTimeout(guard);
+                clearTimeout(hardGuard);
                 var three = mergeWQRecs(aiQs, localRecs, text, target);
-                /* 仅当三道都来自 AI 时才缓存，避免把兜底任务卡缓存成正式题目 */
+                /* 仅当三道都来自 AI 时才缓存，避免把兜底内容缓存成正式题目 */
                 if (aiQs.length >= 3) wqSaveRecCache(cacheKey, three);
-                /* 首轮结果立即交付：三道齐全即展示，不足用同知识点题库题/训练任务补齐 */
+                /* 首轮结果立即交付：有几道展示几道，不足由后台校验/重试补齐 */
                 cb(null, three);
                 /* 后台校验：发现不合格题目时静默替换，不打断阅读 */
                 verifyAndRepair(aiQs.slice(0, 3), function (fixed) {
@@ -8162,53 +8210,9 @@ var IndoorRouter = (function () {
             (aiList || []).forEach(push);
             (localList || []).forEach(push);
             out = out.slice(0, 3);
-            /* 最后兜底：AI 与题库都没结果时，给出三道真实可做的训练任务卡，杜绝「生成失败」 */
-            if (out.length < 3) {
-                var cards = wqTaskCards(origText, target);
-                var usedLayers = {};
-                for (var u = 0; u < out.length; u++) usedLayers[out[u]._layer] = 1;
-                /* 优先补尚未占用的档位，避免出现两张「基础巩固」 */
-                for (var c = 0; c < cards.length && out.length < 3; c++) {
-                    if (!usedLayers[cards[c]._layer]) { cards[c].diff = target; out.push(cards[c]); usedLayers[cards[c]._layer] = 1; }
-                }
-                for (var c2 = 0; c2 < cards.length && out.length < 3; c2++) {
-                    if (out.indexOf(cards[c2]) < 0) { cards[c2].diff = target; out.push(cards[c2]); }
-                }
-            }
+            /* 不再用「训练任务卡」冒充题目：宁可少几道，也不能让用户看到"讲了个寂寞"的假题 */
             for (var i = 0; i < out.length; i++) out[i].diff = target;
             return out;
-        }
-
-        /* 训练任务卡：AI 不可用时的最终兜底，内容真实可执行，不编造题目与答案 */
-        function wqTaskCards(origText, target) {
-            var stem = String(origText || "").trim();
-            return [
-                {
-                    text: "【基础巩固】重做原题并写出完整过程：\n" + stem +
-                        "\n\n要求：不看答案独立完成，逐行写出每一步的推导依据与用到的知识点。",
-                    answer: "完成后对照原题解析逐行核对，重点检查第一步建模与最后一步结论表述。",
-                    idea: "回归最本质的定义与基本公式，先理清已知量与待求量。",
-                    solution: "先独立完成，再对照原题解析核对：①建模是否抓住关键条件；②每一步变形是否有依据；③最终结论是否写完整（含单位与取值条件）。发现卡壳处，回到对应知识点重新推导一遍。",
-                    pitfall: "", method: "", kp: [], ability: [], source: "训练任务",
-                    verify_status: "passed", _aiGenerated: false, _layer: "基础巩固"
-                },
-                {
-                    text: "【变式迁移】自拟一道同型题：把原题中的关键条件或参数改成另一组合理数值（或把结论与条件互换），写出新题并完整解答。",
-                    answer: "新题答案由你推导得出，需保证每一步可验证。",
-                    idea: "抓住原题的母知识点与解题骨架，只改变表层条件。",
-                    solution: "步骤：①找出原题最关键的 1—2 个条件；②把它们替换为新的合理取值；③按原题解法重新推导，并在每一步注明依据；④用特殊值或极端情形检验结果是否合理。",
-                    pitfall: "", method: "", kp: [], ability: [], source: "训练任务",
-                    verify_status: "passed", _aiGenerated: false, _layer: "变式迁移"
-                },
-                {
-                    text: "【拓展探究】把原题的结论推广到一般情形：说明结论在更一般的条件下是否仍成立，并给出证明或举出反例。",
-                    answer: "视推广条件而定，必须给出证明或反例。",
-                    idea: "从特殊到一般，寻找结论成立的本质原因。",
-                    solution: "步骤：①写出原题结论；②尝试放宽某个条件（如维数、参数范围、函数类型）；③判断结论是否仍成立：成立则按原思路证明，不成立则构造具体反例；④总结结论成立所必需的核心条件。",
-                    pitfall: "", method: "", kp: [], ability: [], source: "训练任务",
-                    verify_status: "passed", _aiGenerated: false, _layer: "拓展探究"
-                }
-            ];
         }
 
         /* 文本哈希 + 推荐结果缓存（localStorage），同一道题再次分析可秒开 */
@@ -8725,10 +8729,20 @@ var IndoorRouter = (function () {
             if (bestScore < 2 && best !== "英语") return "其他";
             return best;
         }
-        /* 题型判定：按信号强度优先级判定（选择题 > 填空题 > 判断题 > 解答题） */
+        /* 观点评价/论述类判定：这类题最容易被误判成"其他"，必须单独识别 */
+        function wqIsOpinionQ(text) {
+            var t = String(text || "");
+            if (/(你的(看法|观点|理由)|谈谈(你的)?(看法|理解|认识)|是否同意|你是否|评析|辨析|驳斥|论证|谈谈|怎么看|如何理解|请你评价|有人认为|观点评价)/.test(t)) return true;
+            /* 无学科特征的断言式评价句（如「X 是最强 Y」）：按观点评价处理，避免落入"其他" */
+            if (/(最强|最好|最优|最厉害|最棒|最牛|无人能敌|绝对)/.test(t) && !/(求|计算|证明|方程|函数|等于|=)/.test(t)) return true;
+            return false;
+        }
+        /* 题型判定：按信号强度优先级判定（观点评价 > 选择题 > 填空题 > 判断题 > 解答题） */
         function detectQType(text) {
             var t = text || "";
             if (!t) return "其他";
+            /* 0. 观点评价/论述类：这类题最容易被误判成"其他" */
+            if (wqIsOpinionQ(t)) return "观点评价题";
             /* 1. 选择题：选项标记 A./B./C./D. 或（1）（2）等最强信号 */
             var choiceMark = /([A-D][\.、\)])|(（[A-D]）)/.test(t);
             var choiceWords = /(选择|单选|多选|正确的是|错误的是|下列.*是)/.test(t);
@@ -8742,6 +8756,32 @@ var IndoorRouter = (function () {
             /* 5. 有问号但无上述特征，归解答题 */
             if (/[?？]/.test(t)) return "解答题";
             return "其他";
+        }
+        /* 知识点清洗：AI 常返回"无学科内容/无/未知"这类占位，必须剔除 */
+        function wqCleanKps(arr) {
+            var junk = /^(无|未知|暂无|无学科内容|无明确知识点|无明显知识点|其他|none|null|-|—|n\/a)$/i;
+            var out = [], seen = {};
+            (Array.isArray(arr) ? arr : []).forEach(function (k) {
+                var s = String(k == null ? "" : k).trim().replace(/^["'「『]|["'」』]$/g, "");
+                if (!s || junk.test(s) || seen[s]) return;
+                seen[s] = 1; out.push(s);
+            });
+            return out.slice(0, 6);
+        }
+        /* 观点评价类题目：即使含体育/游戏词，也应按语文学科的议论文来教 */
+        function refineSubjectForTask(text, subject) {
+            if (!wqIsOpinionQ(text)) return subject;
+            if (!subject || subject === "其他" || subject === "体育") return "语文";
+            return subject;
+        }
+        /* 难度校准：AI 偶尔给出 L1 这种明显偏低的判定，用规则交叉校验兜底 */
+        function sanityDiff(d, text) {
+            var t = String(text || "");
+            var n = parseInt(d, 10);
+            if (!(n >= 1 && n <= 10)) n = estimateDifficulty(t);
+            if (wqIsOpinionQ(t) && n < 4) n = 4;
+            if (n < 2 && t.length > 30) n = Math.max(n, estimateDifficulty(t));
+            return Math.max(1, Math.min(10, n));
         }
         /* 知识点提取：返回匹配到的知识点名称数组（按匹配度排序）
          * 三级匹配策略，确保任何题目都能定位到知识点：
@@ -8772,9 +8812,11 @@ var IndoorRouter = (function () {
                 }
                 if (score > 0) hits.push({ name: kps[i].name, score: score });
             }
-            /* 学科兜底：无任何匹配时，取该学科第一个知识点（通常是最核心的），
-             * 并尝试用语料字符集重合度选最相关的 */
+            /* 学科兜底：无任何匹配时，先按"观点评价"兜底，再取该学科第一个知识点 */
             if (!hits.length) {
+                if (wqIsOpinionQ(text) && sub === "语文") {
+                    hits.push({ name: "观点评价", score: 3 });
+                }
                 var tChars = new Set(tNoSpace.split(""));
                 var bestKp = kps[0].name, bestOverlap = -1;
                 for (var k = 0; k < kps.length; k++) {
@@ -9695,8 +9737,8 @@ var IndoorRouter = (function () {
             document.getElementById("wqAiResult").style.display = "block";
 
             /* === 学科/知识点/难度 全部由 AI 判断 === */
-            /* 纯文本秒级响应：12s 超时；含图片（长图切片+视觉识别较慢）放宽到 22s */
-            var _analyzeTimeoutMs = _wqImgs.length ? 22000 : 12000;
+            /* 纯文本超时 20s；含图片（长图切片+视觉识别较慢）放宽到 30s */
+            var _analyzeTimeoutMs = _wqImgs.length ? 30000 : 20000;
             var aiTimeout = setTimeout(function () {
                 if (!_wqIsCurrentRun(_myRun)) return;
                 console.warn("[WQ] AI 分析超时，切换规则兜底");
@@ -9720,10 +9762,11 @@ var IndoorRouter = (function () {
                     return;
                 }
                 _wqOrigText = qText;
+                var _fbSub = refineSubjectForTask(qText, detectSubject(qText));
                 applyAnalysis({
-                    subject: detectSubject(qText), qtype: detectQType(qText),
-                    kps: detectKnowledgePoints(qText, detectSubject(qText)), diff: estimateDifficulty(qText),
-                    errorCause: detectErrorCause(qText, detectQType(qText), estimateDifficulty(qText)), timeSensitive: isTimeSensitive(qText)
+                    subject: _fbSub, qtype: detectQType(qText),
+                    kps: wqCleanKps(detectKnowledgePoints(qText, _fbSub)), diff: sanityDiff(0, qText),
+                    errorCause: detectErrorCause(qText, detectQType(qText), sanityDiff(0, qText)), timeSensitive: isTimeSensitive(qText)
                 }, _myRun);
             }
 
@@ -9771,10 +9814,20 @@ var IndoorRouter = (function () {
             function applyAnalysis(res, runSeq) {
                 if (!_wqIsCurrentRun(runSeq)) return; /* 旧轮次结果直接丢弃，防止串题 */
                 if (res.text) _wqOrigText = res.text;
-                _wqSubject = res.subject || "其他";
-                _wqQtype = res.qtype || "解答题";
-                _wqKps = res.kps || [];
-                _wqDiff = res.diff || 5;
+                /* 学科/题型/知识点做二次校验：AI 可能返回"其他/无学科内容"等无效值 */
+                var _subj = res.subject || "其他";
+                if (!_subj || _subj === "其他") {
+                    var _ruleSub = detectSubject(_wqOrigText);
+                    if (_ruleSub && _ruleSub !== "其他") _subj = _ruleSub;
+                }
+                _wqSubject = refineSubjectForTask(_wqOrigText, _subj);
+                var _qt = res.qtype || "";
+                if (!_qt || _qt === "其他") _qt = detectQType(_wqOrigText);
+                if (wqIsOpinionQ(_wqOrigText || "")) _qt = "观点评价题";
+                _wqQtype = _qt || "解答题";
+                _wqKps = wqCleanKps(res.kps);
+                if (!_wqKps.length) _wqKps = wqCleanKps(detectKnowledgePoints(_wqOrigText, _wqSubject));
+                _wqDiff = sanityDiff(res.diff, _wqOrigText);
                 _wqError = res.errorCause || "method";
                 _wqTimeSensitive = res.timeSensitive === true;
                 _wqCritique = critiqueQuestion(_wqOrigText, _wqQtype);
@@ -9805,10 +9858,10 @@ var IndoorRouter = (function () {
             if (aiBtn) { aiBtn.disabled = false; aiBtn.textContent = "🔍 分析题目"; }
             showToast("分析超时，已切换为本地规则分析");
             _wqOrigText = text;
-            _wqSubject = detectSubject(text);
+            _wqSubject = refineSubjectForTask(text, detectSubject(text));
             _wqQtype = detectQType(text);
-            _wqKps = detectKnowledgePoints(text, _wqSubject);
-            _wqDiff = estimateDifficulty(text);
+            _wqKps = wqCleanKps(detectKnowledgePoints(text, _wqSubject));
+            _wqDiff = sanityDiff(0, text);
             _wqError = detectErrorCause(text, _wqQtype, _wqDiff);
             _wqCritique = critiqueQuestion(text, _wqQtype);
             _wqMastery = {};
@@ -9916,11 +9969,16 @@ var IndoorRouter = (function () {
 
         /* 渲染单题分析到主面板（讲解/母题/推荐从缓存读取） */
         function renderMultiQAnalysis(q) {
-            _wqSubject = q.subject;
-            _wqOrigText = q.text || "";
-            _wqQtype = q.qtype;
-            _wqKps = q.kps || [];
-            _wqDiff = q.diff || 5;
+            var _mt = q.text || "";
+            var _ms = (q.subject && q.subject !== "其他") ? q.subject : detectSubject(_mt);
+            _wqSubject = refineSubjectForTask(_mt, _ms);
+            _wqOrigText = _mt;
+            var _mq = (q.qtype && q.qtype !== "其他") ? q.qtype : detectQType(_mt);
+            if (/(你的(看法|观点|理由)|谈谈(你的)?(看法|理解|认识)|是否同意|你是否|评析|辨析|论证|怎么看|如何理解|请你评价)/.test(_mt)) _mq = "观点评价题";
+            _wqQtype = _mq || "解答题";
+            _wqKps = wqCleanKps(q.kps);
+            if (!_wqKps.length) _wqKps = wqCleanKps(detectKnowledgePoints(_mt, _wqSubject));
+            _wqDiff = sanityDiff(q.diff, _mt);
             _wqError = q.errorCause || detectErrorCause(q.text, _wqQtype, _wqDiff);
             _wqCritique = critiqueQuestion(q.text, _wqQtype);
             _wqMastery = {};
@@ -10388,6 +10446,7 @@ var IndoorRouter = (function () {
             if (!box) return;
             /* 新一轮渲染：清空上一题的重绘缓存与重绘钩子，防止旧题内容被画到新界面 */
             var _renderToken = ++_wqRenderSeq;
+            _wqRecsDelivered = false;   /* 每轮渲染重置交付状态，避免旧的"已生成完毕"残留 */
             _wqLastRecs = null;
             _wqLastBankRecs = null;
             window._wqRepaintExplain = null;
@@ -10658,12 +10717,11 @@ var IndoorRouter = (function () {
             motherEl.innerHTML = '<div class="wq-mother-empty">📚 母题溯源：正在分析原题的原型母题…</div>';
         }
 
-            /* 渲染分层推荐（严格 L+1 冲刺，满级推满级） */
+            /* 渲染分层推荐（严格 L+1 冲刺，满级推满级）——按 基础→变式→拓展 顺序阅读 */
             var layerDefs = [
-                { key: "top", title: "🚀 拓展探究", tip: "难度+1 冲刺拔高，同知识点·更深更广", cls: "wq-layer-challenge" },
-                { key: "high", title: "📈 综合拔高", tip: "综合运用，提升能力", cls: "wq-layer-advance" },
+                { key: "low", title: "🌱 基础巩固", tip: "同知识点直接应用，比原题多一步推理", cls: "wq-layer-basic" },
                 { key: "mid", title: "🔄 变式迁移", tip: "换个角度考查同一知识点", cls: "wq-layer-variant" },
-                { key: "low", title: "🌱 基础巩固", tip: "吃透基本概念与方法", cls: "wq-layer-basic" }
+                { key: "high", title: "🚀 拓展探究", tip: "难度+1 深化拓展，同知识点·更深更广", cls: "wq-layer-advance" }
             ];
 
             /* 抽取为闭包 paintRecs(recsArr)，便于 AI 推题返回后合并重渲染 */
@@ -10698,13 +10756,33 @@ var IndoorRouter = (function () {
                     rq0._qScore = qScore;
                     cleanRecs.push(rq0);
                 }
-                /* 择优：后台可跑多道，此处只取质量最高的 3 道 */
+                /* 分层铁律：每个档位最多 1 道，按「基础巩固 → 变式迁移 → 拓展探究」各就各位；
+                   同一档位有多道时取质量最高的一道；不足 3 道再由剩余高质量题补位 */
+                var tierOrder = ["basic", "variant", "deep"];
+                function tierKeyOf(q) {
+                    if (q && q._tierKey) return q._tierKey;
+                    var ln = String((q && q._layer) || "");
+                    if (/基础|巩固/.test(ln)) return "basic";
+                    if (/变式|迁移/.test(ln)) return "variant";
+                    if (/拔高|拓展|探究|深化/.test(ln)) return "deep";
+                    return "";
+                }
                 cleanRecs.sort(function (a, b) { return (b._qScore || 0) - (a._qScore || 0); });
-                recsArr = cleanRecs.slice(0, 3);
+                var picked = [], usedIdx = {};
+                for (var ti3 = 0; ti3 < tierOrder.length; ti3++) {
+                    for (var ci3 = 0; ci3 < cleanRecs.length; ci3++) {
+                        if (usedIdx[ci3]) continue;
+                        if (tierKeyOf(cleanRecs[ci3]) === tierOrder[ti3]) { picked.push(cleanRecs[ci3]); usedIdx[ci3] = 1; break; }
+                    }
+                }
+                for (var ci4 = 0; ci4 < cleanRecs.length && picked.length < 3; ci4++) {
+                    if (!usedIdx[ci4]) { picked.push(cleanRecs[ci4]); usedIdx[ci4] = 1; }
+                }
+                recsArr = picked.slice(0, 3);
                 var ls = { low: [], mid: [], high: [], top: [] };
                 for (var rr = 0; rr < recsArr.length; rr++) {
                     var dd = recsArr[rr].diff || 1;
-                    var lkey = dd <= 4 ? "low" : dd <= 6 ? "mid" : dd <= 8 ? "high" : "top";
+                    var lkey = dd <= 4 ? "low" : dd <= 6 ? "mid" : "high";
                     /* 难度已统一为原题+1，分层展示改用 AI 给出的层级标签，保持基础/变式/拔高的视觉分区 */
                     var lname = String(recsArr[rr]._layer || "");
                     if (/基础|巩固/.test(lname)) lkey = "low";
@@ -10777,11 +10855,12 @@ var IndoorRouter = (function () {
                                     _wqRecsDelivered = true;
                                     paintRecs(fb.slice(0, 3));
                                 } else if (!_wqRecsDelivered && el) {
-                                    /* 理论不可达：aiRecommendQuestions 必带兜底。
-                                       万一回调异常也直接铺训练任务卡，绝不显示"生成失败" */
+                                    /* AI 与题库都没出题：给重试入口，不用训练任务卡冒充题目 */
                                     _recFallbackDone = true;
-                                    var _cards = wqTaskCards(origText, minRecDiff);
-                                    if (_cards && _cards.length) paintRecs(_cards);
+                                    el.innerHTML = '<div style="color:#64748b;padding:16px;text-align:center;font-size:13px">暂时没有生成出合适的分层题' +
+                                        '<div style="margin-top:10px"><button type="button" class="wq-retry-recs2" style="background:#4f46e5;color:#fff;border:none;border-radius:8px;padding:8px 16px;font-size:13px;cursor:pointer">重新生成分层题</button></div></div>';
+                                    var rb2 = el.querySelector(".wq-retry-recs2");
+                                    if (rb2) rb2.onclick = function () { _recFallbackDone = false; _recFallbackBusy = false; paintRecs([]); };
                                 }
                             });
                         }
@@ -10875,7 +10954,9 @@ var IndoorRouter = (function () {
             /* 多题模式下由 analyzeMultiQuestion 统一调度 pipeline，此处跳过避免重复 */
             if (!_wqMultiQuestions && enabledProviders().length && origText.trim()) {
                 /* 流式超时看门狗：20s 内无任何讲解输出则提示超时，避免永远"生成中" */
+                var _wdToken = _wqRenderSeq;
                 var explainWatchdog = setTimeout(function () {
+                    if (_wdToken !== _wqRenderSeq) return; /* 界面已重渲染：旧看门狗不得改写新内容 */
                     var eb = document.getElementById("wqAiExplainBox");
                     if (eb && eb.innerHTML.indexOf("讲解加载中") >= 0) {
                         eb.innerHTML = '<div style="color:#92400e;background:#fffbeb;border:1px solid #fde68a;border-radius:8px;padding:10px 12px;font-size:13px;margin-top:8px">' +
@@ -10891,9 +10972,11 @@ var IndoorRouter = (function () {
                         /* 流式讲解渲染：rAF 节流，避免长答案时每帧全文重渲染卡顿 */
                         var _explText = "", _explRaf = null;
                         var _pipeRun = _wqRunSeq;  /* 本轮流式管线令牌：界面已切换则丢弃回调 */
+                        var _pipeSeq = _renderToken;  /* 同一道题可能触发多次渲染，只允许最新一次写讲解区，避免两种说法闪烁 */
+                        var _pipeAlive = function () { return _pipeSeq === _wqRenderSeq && _wqIsCurrentRun(_pipeRun); };
                         var flushExplain = function () {
                             _explRaf = null;
-                            if (!_wqIsCurrentRun(_pipeRun)) return;
+                            if (!_pipeAlive()) return;
                             if (explainWatchdog) { clearTimeout(explainWatchdog); explainWatchdog = null; }
                             var explBox = document.getElementById("wqAiExplainBox");
                             if (explBox) {
@@ -10904,7 +10987,7 @@ var IndoorRouter = (function () {
                             }
                         };
                         var onExplainCb = function (text) {
-                            if (!_wqIsCurrentRun(_pipeRun)) return;
+                            if (!_pipeAlive()) return;
                             _explText = text || "";
                             window._wqCurExplainText = _explText;   /* 供保存错题/复习测验使用 */
                             if (_explRaf == null) _explRaf = requestAnimationFrame(flushExplain);
@@ -10948,13 +11031,13 @@ var IndoorRouter = (function () {
                         onExplain: onExplainCb,
                         /* ② 母题溯源：全部由 AI 生成，题库母题已弃用 */
                         onMother: function (m) {
-                            if (!_wqIsCurrentRun(_pipeRun)) return; /* 旧轮次：丢弃，防止母题串题 */
+                            if (!_pipeAlive()) return; /* 旧轮次：丢弃，防止母题串题 */
                             paintMother(m);
                         },
-                        /* ③ 推荐题：主管线结果先秒级预览；权威结果由「生成 + 专门校验 AI」产出，
-                         *    严格 L+1、答案写透、固定三道（ok 才交付，否则自动改到补满） */
+                        /* ③ 推荐题：只认「分层生成 + 专门校验 AI」的权威结果（严格 L+1、答案写透、固定三档）；
+                         *    主管线给出的题仅在权威结果失败时兜底，绝不先预览再替换（避免闪烁） */
                         onRecs: function (aiRecsRaw) {
-                            if (!_wqIsCurrentRun(_pipeRun)) return; /* 旧轮次：丢弃 */
+                            if (!_pipeAlive()) return; /* 旧轮次：丢弃 */
                             var aiRecs = [];
                             if (aiRecsRaw && aiRecsRaw.length) {
                                 for (var ri = 0; ri < aiRecsRaw.length; ri++) {
@@ -10970,23 +11053,41 @@ var IndoorRouter = (function () {
                                     });
                                 }
                             }
-                            /* 先秒级展示主管线已有的推荐题，用户不用等 */
-                            if (aiRecs.length) paintRecs(aiRecs.slice(0, 6));
-                            /* 已有一轮独立推题在进行或已交付时不再重复发起（那一轮带校验） */
-                            if (_recFallbackBusy || _recFallbackDone) return;
+                            /* 不再先画主管线预览：预览题往往未分层、未校验，
+                             * 会在权威结果到达时整体替换，造成"两种题目来回闪" */
+                            /* 已有一轮独立推题在进行时不再重复发起（那一轮带分层+校验） */
+                            if (_recFallbackBusy) return;
+                            if (_recFallbackDone) {
+                                /* 权威结果已失败且界面还空着：主管线这几道可以兜底顶上 */
+                                if (aiRecs.length && !_wqRecsDelivered) { _wqRecsDelivered = true; paintRecs(aiRecs.slice(0, 3)); }
+                                return;
+                            }
                             _recFallbackBusy = true;
                             var recEl = document.getElementById("wqRecList");
                             if (recEl && !aiRecs.length) recEl.innerHTML = '<div style="color:#6366f1;padding:16px;text-align:center;font-size:13px">🔄 正在生成分层推荐题…</div>';
                             aiRecommendQuestions(origText, sub, _wqKps, origDiff, function (err, fallbackRecs) {
                                 _recFallbackBusy = false;
                                 if (_renderToken !== _wqRenderSeq) return; /* 界面已重渲染：丢弃旧题结果 */
-                                if (!_wqIsCurrentRun(_pipeRun)) return; /* 旧轮次：丢弃 */
+                                if (!_pipeAlive()) return; /* 旧轮次：丢弃 */
                                 if (err || !fallbackRecs || !fallbackRecs.length) {
-                                    if (!_wqRecsDelivered && !aiRecs.length && recEl) {
-                                        /* 兜底：回调异常也铺训练任务卡，不显示"生成失败" */
-                                        _recFallbackDone = true;
-                                        var _cards2 = wqTaskCards(origText, targetDiff);
-                                        if (_cards2 && _cards2.length) paintRecs(_cards2);
+                                    _recFallbackDone = true;
+                                    if (_wqRecsDelivered) return;
+                                    /* 权威分层题失败时，才退回主管线给的那几道（聊胜于无） */
+                                    if (aiRecs.length) {
+                                        _wqRecsDelivered = true;
+                                        paintRecs(aiRecs.slice(0, 3));
+                                        return;
+                                    }
+                                    /* AI 与题库都没出题：保留重试入口，不再拿"训练任务卡"冒充分层题 */
+                                    if (recEl) {
+                                        recEl.innerHTML = '<div style="color:#64748b;padding:16px;text-align:center;font-size:13px">暂时没有生成出合适的分层题' +
+                                            '<div style="margin-top:10px"><button type="button" class="wq-retry-recs" style="background:#4f46e5;color:#fff;border:none;border-radius:8px;padding:8px 16px;font-size:13px;cursor:pointer">重新生成分层题</button></div></div>';
+                                        var rb = recEl.querySelector(".wq-retry-recs");
+                                        if (rb) rb.onclick = function () {
+                                            _recFallbackDone = false;
+                                            _recFallbackBusy = false;
+                                            paintRecs([]);
+                                        };
                                     }
                                     return;
                                 }
@@ -11006,7 +11107,7 @@ var IndoorRouter = (function () {
                             });
                         },
                         onDone: function (err) {
-                            if (!_wqIsCurrentRun(_pipeRun)) return; /* 旧轮次：丢弃 */
+                            if (!_pipeAlive()) return; /* 旧轮次：丢弃 */
                             /* 强制刷新最后一帧渲染，避免末尾内容丢失 */
                             if (_explRaf != null) { cancelAnimationFrame(_explRaf); _explRaf = null; flushExplain(); }
                             if (explainWatchdog) { clearTimeout(explainWatchdog); explainWatchdog = null; }
@@ -12137,7 +12238,13 @@ var IndoorRouter = (function () {
             }
             /* AI 命题：以母知识点为根出 L+2 新题；失败自动换任务模型重试，本地新题不打断 */
             if (WQ_AI_CONFIG.enabled && enabledProviders().length) {
-                var _quizTasks = ["pipeline", "generate", "analyze"], _quizTry = 0;
+                var _quizTasks = ["pipeline", "generate"], _quizTry = 0;
+                /* 12 秒硬截止：界面绝不无限停在"正在生成"，到点给重试入口；AI 晚到仍会替换 */
+                var _quizDeadline = setTimeout(function () {
+                    if (!document.getElementById("wqQuizBody")) return;
+                    if (_wqReviewQuiz && _wqReviewQuiz.questions && _wqReviewQuiz.questions.length) return;
+                    showWQReviewQuizError("复习题生成超时，题库也暂无同母知识点的新题<br><span style=\"font-size:12px;color:#64748b\">可点击下方重试，或先做错题本里的原题</span>", true);
+                }, 12000);
                 function tryAI() {
                     aiGenerateReviewQuiz(subjects, kps, targetDiff, REVIEW_Q_COUNT, function (err, quiz) {
                         /* 弹窗已被关闭则丢弃，避免串题 */
@@ -12145,11 +12252,13 @@ var IndoorRouter = (function () {
                         if (err || !quiz || !quiz.questions || !quiz.questions.length) {
                             _quizTry++;
                             if (_quizTry < _quizTasks.length) { tryAI(); return; }
+                            clearTimeout(_quizDeadline);
                             if (!(_wqReviewQuiz && _wqReviewQuiz.questions && _wqReviewQuiz.questions.length)) {
                                 showWQReviewQuizError("AI 出题超时，题库也暂无同母知识点的新题<br><span style=\"font-size:12px;color:#64748b\">请检查网络后重试</span>", true);
                             }
                             return;
                         }
+                        clearTimeout(_quizDeadline);
                         /* 用户已经开始作答则不打断，否则用 AI 题无缝替换本地题 */
                         var started = _wqReviewQuiz && ((_wqReviewQuiz.answers && _wqReviewQuiz.answers.length) || _wqReviewQuiz.current > 0);
                         if (started) return;
@@ -12274,6 +12383,16 @@ var IndoorRouter = (function () {
                     if (m) {
                         try { obj = JSON.parse(m[0]); }
                         catch (e1) { try { obj = JSON.parse(sanitizeJsonBackslashes(m[0])); } catch (e2) { obj = null; } }
+                    }
+                    /* 兜底：整体 JSON 解析失败时，单独抠出 questions 数组 */
+                    if (!obj) {
+                        var qm = /"questions"\s*:\s*(\[[\s\S]*\])/.exec(raw);
+                        if (qm) {
+                            try {
+                                var qarr = JSON.parse(sanitizeJsonBackslashes(qm[1]));
+                                if (Array.isArray(qarr) && qarr.length) obj = { questions: qarr };
+                            } catch (e3) { /* 忽略 */ }
+                        }
                     }
                     if (obj && Array.isArray(obj.questions) && obj.questions.length) {
                         var _fillOpts = ["条件不足，无法确定", "结论与题设无关", "需要补充额外条件", "上述说法均不正确"];
