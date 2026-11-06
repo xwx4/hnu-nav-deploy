@@ -7269,6 +7269,59 @@ var IndoorRouter = (function () {
                 }, timeoutMs + 500);
             },
 
+            /* 对冲流式：主模型（效果优先）先起流；若 hedgeDelay 内一个字都没出，
+             * 立刻并行拉起备用模型（速度优先），谁先出字算谁赢，另一个直接丢弃。
+             * 既保住高质量主模型，又避免主模型排队时把用户晾在空白页。 */
+            hedgeStream: function (messages, taskTypes, onChunk, cb, opts) {
+                var self = this;
+                var providers = enabledProviders();
+                if (!providers.length) { cb(new Error("no_ai_provider"), null); return; }
+                var provider = providers[0];
+                var tasks = (taskTypes || []).filter(Boolean);
+                if (!tasks.length) { self.callStream(messages, "pipeline", onChunk, cb); return; }
+                var primaryModel = self.selectModels(tasks[0])[0];
+                var hedgeModel = tasks[1] ? self.selectModels(tasks[1])[0] : null;
+                if (hedgeModel === primaryModel) hedgeModel = null;
+                var hedgeDelay = (opts && opts.hedgeDelay) || 2500;
+                var winner = null, done = false, started = {}, buf = {}, failed = 0;
+                var total = hedgeModel ? 2 : 1;
+                function finish(err, res) {
+                    if (done) return;
+                    done = true;
+                    cb(err, res);
+                }
+                function start(model) {
+                    if (!model || started[model]) return;
+                    started[model] = true;
+                    self._callStream(provider, messages, model, function (acc, delta) {
+                        if (done) return;
+                        if (!winner) winner = model;
+                        if (winner !== model) return;   /* 输了的那一路：静默丢弃，绝不换说法 */
+                        buf[model] = acc;
+                        if (onChunk) onChunk(acc, delta);
+                    }, function (err, fullText) {
+                        if (done) return;
+                        if (winner === model) {
+                            var text = (fullText && String(fullText).trim()) ? fullText : buf[model];
+                            if (text && String(text).trim()) { finish(null, { provider: provider.name, text: text, model: model }); }
+                            else { finish(new Error("all_models_failed"), null); }
+                            return;
+                        }
+                        if (winner) return;
+                        failed++;
+                        if (failed >= total) finish(new Error("all_models_failed"), null);
+                    });
+                }
+                start(primaryModel);
+                if (hedgeModel) {
+                    setTimeout(function () {
+                        if (done || winner) return;
+                        console.warn("[AI Router] primary " + primaryModel + " 首字超时，启动对冲 " + hedgeModel);
+                        start(hedgeModel);
+                    }, hedgeDelay);
+                }
+            },
+
             /* 流式调用（SSE）：onChunk(accText, delta) 每收到一个 chunk 回调一次，实现秒级首字 */
             callStream: function (messages, taskType, onChunk, cb) {
                 var self = this;
@@ -7881,7 +7934,7 @@ var IndoorRouter = (function () {
             var explainDone = false, motherDone = false, recsDone = false;
             var motherTimer = null, recsTimer = null;
 
-            WQ_AI_ROUTER.callStream(messages, taskType, function (full, delta) {
+            WQ_AI_ROUTER.hedgeStream(messages, [taskType, "analyze"], function (full, delta) {
                 acc = full;
                 /* 实时解析分段标记，逐段渲染 */
                 if (stage === "explain") {
@@ -8179,7 +8232,7 @@ var IndoorRouter = (function () {
                 }
                 var acc = "", lastCount = 0;
                 /* pipeline 首选 flash 模型：流式生成，边出边交付 */
-                WQ_AI_ROUTER.callStream(msgs, task || "pipeline", function (streamText) {
+                WQ_AI_ROUTER.hedgeStream(msgs, [task || "pipeline", "analyze"], function (streamText) {
                     acc = streamText || acc;
                     if (!onPartial || !acc) return;
                     var arr = parseBatch(acc);
