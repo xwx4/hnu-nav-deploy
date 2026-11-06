@@ -6997,7 +6997,8 @@ var IndoorRouter = (function () {
             proxyEndpoint: "/api/chat",
             /* Tencent TokenHub 统一接入点 */
             endpoint: "https://tokenhub.tencentmaas.com/v1/chat/completions",
-            apiKey: "sk-bHsivwabq4VodIU1tXxAjWUOOEkrlA65UFoRSrJ7C2fWPPrW",
+            /* 密钥不写进前端（公开仓库会被爬取盗刷）；服务端优先读环境变量 TOKENHUB_API_KEY */
+            apiKey: "",
             /* 模型路由：根据任务类型选择最合适的模型（主模型 + 降级备选） */
             modelRouter: {
                 analyze:  ["deepseek-v4.1-flash", "glm-5.3", "hy3"],       /* 学科/题型/难度/知识点分析（快、省） */
@@ -7012,7 +7013,7 @@ var IndoorRouter = (function () {
             },
             /* 默认 Provider（兼容旧逻辑） */
             providers: [
-                { id: "default", name: "Tencent-TokenHub", endpoint: "https://tokenhub.tencentmaas.com/v1/chat/completions", apiKey: "sk-bHsivwabq4VodIU1tXxAjWUOOEkrlA65UFoRSrJ7C2fWPPrW", model: "deepseek-v4-pro", enabled: true }
+                { id: "default", name: "Tencent-TokenHub", endpoint: "https://tokenhub.tencentmaas.com/v1/chat/completions", apiKey: "", model: "deepseek-v4-pro", enabled: true }
             ],
             /* 评分权重（0-1） */
             scoreWeights: {

@@ -29,14 +29,20 @@ export async function onRequestPost(context) {
   }
 
   var endpoint = body && body.endpoint;
-  var apiKey = body && body.apiKey;
+  /* 密钥优先从环境变量读取（可用新 Key 覆盖浏览器 localStorage 里的旧 Key），避免把 Key 写进公开仓库被爬取盗刷 */
+  var apiKey = (context.env && context.env.TOKENHUB_API_KEY) || (body && body.apiKey) || "";
   var model = body && body.model;
   var messages = body && body.messages;
   var stream = body && body.stream;
   var reasoningEffort = body && body.reasoning_effort;
 
-  if (!endpoint || !apiKey || !model || !Array.isArray(messages)) {
-    return json({ error: "missing required fields: endpoint, apiKey, model, messages" }, 400);
+  if (!endpoint || !model || !Array.isArray(messages)) {
+    return json({ error: "missing required fields: endpoint, model, messages" }, 400);
+  }
+
+  /* apiKey 已在上方由 body.apiKey 或 env.TOKENHUB_API_KEY 解析；两者都没有才报错 */
+  if (!apiKey) {
+    return json({ error: "missing apiKey: 请在 Cloudflare Pages 环境变量中配置 TOKENHUB_API_KEY" }, 400);
   }
 
   if (ALLOWED_ENDPOINTS.indexOf(endpoint) === -1) {

@@ -16,7 +16,7 @@
 
 /* ============ 配置 ============ */
 const TENCENT_ENDPOINT = "https://tokenhub.tencentmaas.com/v1/chat/completions";
-const API_KEY = "sk-bHsivwabq4VodIU1tXxAjWUOOEkrlA65UFoRSrJ7C2fWPPrW";
+const API_KEY = (typeof TOKENHUB_API_KEY !== "undefined" && TOKENHUB_API_KEY) || "";
 
 /* 模型路由：用 Cloudflare Workers AI（内网调用，避免跨境超时） */
 const MODEL = {
