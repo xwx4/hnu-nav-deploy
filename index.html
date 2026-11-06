@@ -10845,6 +10845,16 @@ var IndoorRouter = (function () {
             /* 抽取为闭包 paintRecs(recsArr)，便于 AI 推题返回后合并重渲染 */
             var _recFallbackBusy = false; /* 兜底推题进行中，避免重复发起 */
             var _recFallbackDone = false; /* 独立推题已交付过，避免主管线结果触发第二轮重复生成 */
+            /* 结果归属校验：只认「当前展示的仍是这道题」。
+             * 早期用渲染序号判断，重渲染一次就会把在途的推题结果全部丢弃，导致只剩骨架屏 */
+            function _recSameQuestion() {
+                var box = document.getElementById("wqText");
+                var cur = String(_wqOrigText || (box && box.value) || "");
+                var want = String(origText || (box && box.value) || "");
+                /* 取不到题面时不拦截：宁可先把结果显示出来，也不留空白骨架 */
+                if (!cur || !want) return true;
+                return cur.replace(/\s+/g, "") === want.replace(/\s+/g, "");
+            }
             function paintRecs(recsArr) {
                 /* 缓存最近一版渲染输入，供 KaTeX 晚加载后重绘 */
                 if (recsArr && recsArr.length) _wqLastRecs = recsArr;
@@ -10968,7 +10978,8 @@ var IndoorRouter = (function () {
                             _recFallbackBusy = true;
                             aiRecommendQuestions(origText, sub, _wqKps, origDiff, function (err, fb) {
                                 _recFallbackBusy = false;
-                                if (_renderToken !== _wqRenderSeq) return; /* 界面已重渲染：丢弃旧题结果 */
+                                console.info("[Rec] cb n=" + ((fb && fb.length) || 0) + " sameQ=" + _recSameQuestion());
+                                if (!_recSameQuestion()) return; /* 已切到别的题：丢弃旧题结果 */
                                 if (!err && fb && fb.length) {
                                     _recFallbackDone = true;
                                     _wqRecsDelivered = true;
@@ -11118,8 +11129,8 @@ var IndoorRouter = (function () {
                             if (recEl && !aiRecs.length) recEl.innerHTML = '<div style="color:#6366f1;padding:16px;text-align:center;font-size:13px">🔄 正在生成分层推荐题…</div>';
                             aiRecommendQuestions(origText, sub, _wqKps, origDiff, function (err, fallbackRecs) {
                                 _recFallbackBusy = false;
-                                if (_renderToken !== _wqRenderSeq) return; /* 界面已重渲染：丢弃旧题结果 */
-                                if (!_pipeAlive()) return; /* 旧轮次：丢弃 */
+                                console.info("[Rec] cb2 n=" + ((fallbackRecs && fallbackRecs.length) || 0) + " sameQ=" + _recSameQuestion());
+                                if (!_recSameQuestion()) return; /* 已切到别的题：丢弃旧题结果 */
                                 if (err || !fallbackRecs || !fallbackRecs.length) {
                                     _recFallbackDone = true;
                                     if (_wqRecsDelivered) return;
