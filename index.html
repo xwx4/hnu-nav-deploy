@@ -8158,7 +8158,7 @@ var IndoorRouter = (function () {
             var aiQs = [], delivered = false, aiFinished = false, hardFired = false, topUpStarted = false;
             /* 缺档兜底：无论两批是否都结束，只要过了红线还不满三道，就立刻用 AI 补缺失档位 */
             function ensureThree() {
-                if (aiQs.length >= 3 || topUpStarted) return;
+                if (mergedNow().length >= 3 || topUpStarted) return;
                 topUpStarted = true;
                 topUp(0);
             }
@@ -8381,16 +8381,16 @@ var IndoorRouter = (function () {
                 clearTimeout(guard);
                 clearTimeout(hardGuard);
                 var three = mergedNow();
-                /* 仅当三道都来自 AI 时才缓存，避免把兜底内容缓存成正式题目 */
-                if (aiQs.length >= 3) wqSaveRecCache(cacheKey, three);
+                /* 仅当可展示的三道齐全时才缓存，避免把残缺结果缓存成正式题目 */
+                if (three.length >= 3) wqSaveRecCache(cacheKey, three);
                 var sig = sigOf(three);
                 if (sig !== lastSig) { lastSig = sig; cb(null, three); }
                 /* 后台校验：发现不合格题目时静默替换，不打断阅读 */
-                if (aiQs.length < 3) ensureThree();
-                verifyAndRepair(aiQs.slice(0, 3), function (fixed) {
+                if (three.length < 3) ensureThree();
+                verifyAndRepair(three, function (fixed) {
                     if (!fixed || !fixed.length) return;
-                    var merged = mergeWQRecs(aiQs.map(function (q, i) { return fixed[i] || q; }), [], text, target);
-                    if (aiQs.length >= 3) wqSaveRecCache(cacheKey, merged);
+                    var merged = mergeWQRecs(three.map(function (q, i) { return fixed[i] || q; }), [], text, target);
+                    if (merged.length >= 3) wqSaveRecCache(cacheKey, merged);
                     var s2 = sigOf(merged);
                     if (s2 === lastSig) return;
                     lastSig = s2;
@@ -8415,9 +8415,10 @@ var IndoorRouter = (function () {
             /* 不足三道：后台只补缺失档位（全部来自 AI，绝不使用题库） */
             function topUp(tries, missList) {
                 tries = tries || 0;
-                if (aiQs.length >= 3 || tries >= 5) return;
+                /* 以「合并后真正可展示的道数」为准：被相似度过滤掉的题不能算补齐 */
+                if (mergedNow().length >= 3 || tries >= 5) return;
                 var have = {};
-                aiQs.forEach(function (q) { if (q._tierKey) have[q._tierKey] = 1; });
+                mergedNow().forEach(function (q) { if (q._tierKey) have[q._tierKey] = 1; });
                 var miss = WQ_REC_TIERS.filter(function (t) { return !have[t.key]; });
                 if (missList && missList.length) {
                     var picked = miss.filter(function (t) {
@@ -8433,20 +8434,20 @@ var IndoorRouter = (function () {
                         extraQs = extraQs.concat(qs);
                         rebuildAiQs();
                         var merged = mergedNow();
-                        if (aiQs.length >= 3) wqSaveRecCache(cacheKey, merged);
+                        if (merged.length >= 3) wqSaveRecCache(cacheKey, merged);
                         var sg = sigOf(merged);
                         if (sg !== lastSig) { lastSig = sg; cb(null, merged); }
                     }
                     /* 网关拥塞时按退避重试，直到三档补齐（仍然只走 AI） */
-                    if (aiQs.length < 3) setTimeout(function () { topUp(tries + 1, miss); }, Math.min(8000, 1200 * Math.pow(2, tries)));
+                    if (mergedNow().length < 3) setTimeout(function () { topUp(tries + 1, miss); }, Math.min(8000, 1200 * Math.pow(2, tries)));
                 }, "generate", null, PAIR_POOL[tries % PAIR_POOL.length]);
             }
             /* 某个批次已结束、而某档位既没产出也不在别的批次里生成 → 立刻补题，
              * 不必等两批全部跑完（否则缺一档要白等 20s+） */
             function maybeTopUp() {
-                if (aiQs.length >= 3 || topUpStarted) return;
+                if (mergedNow().length >= 3 || topUpStarted) return;
                 var have = {};
-                aiQs.forEach(function (q) { if (q._tierKey) have[q._tierKey] = 1; });
+                mergedNow().forEach(function (q) { if (q._tierKey) have[q._tierKey] = 1; });
                 var flying = {};
                 if (!batchDone.b1) { flying[WQ_REC_TIERS[0].key] = 1; flying[WQ_REC_TIERS[1].key] = 1; }
                 if (!batchDone.b2) { flying[WQ_REC_TIERS[2].key] = 1; }
@@ -8468,7 +8469,7 @@ var IndoorRouter = (function () {
                     maybeTopUp();
                     if (--pending > 0) { deliverPartial(); return; }
                     /* 两批全空：换模型链路重试，而不是直接放弃 */
-                    if (!aiQs.length && !retried) {
+                    if (!mergedNow().length && !retried) {
                         retried = true;
                         retryAll();
                         return;
@@ -8502,7 +8503,10 @@ var IndoorRouter = (function () {
             var out = [], seen = [];
             function push(q) {
                 if (!q || !q.text) return;
-                if (textSim(origText || "", q.text) > 0.6) return;
+                /* AI 新出的变式题本来就会和原题共用同一函数/情境，
+                 * 用 0.6 的严格阈值会把整档题误杀；只剔除几乎逐字重复的情况 */
+                var origSim = textSim(origText || "", q.text);
+                if (q._aiGenerated ? origSim > 0.9 : origSim > 0.6) return;
                 /* 同一档位只保留最先到达的一道：补题与主批次可能同时产出同一档，
                  * 不去重就会出现两道「变式迁移」并把另一档挤掉 */
                 if (q._tierKey) {
@@ -10844,6 +10848,7 @@ var IndoorRouter = (function () {
             function paintRecs(recsArr) {
                 /* 缓存最近一版渲染输入，供 KaTeX 晚加载后重绘 */
                 if (recsArr && recsArr.length) _wqLastRecs = recsArr;
+                try { console.info("[Rec] paint=" + ((recsArr && recsArr.length) || 0) + " layers=" + (recsArr || []).map(function (q) { return q._layer || "?"; }).join("|")); } catch (e) {}
                 /* 系统级难度校验：推荐题难度统一压到「原题难度+1」，既不允许低于也不允许高于，
                    避免 L7 原题推出 L9 的错位；同时按题干相似度去重，避免出现两道一模一样的题 */
                 var minRecDiff = Math.min(10, (origDiff || 1) + 1);
