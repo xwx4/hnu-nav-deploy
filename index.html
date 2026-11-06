@@ -7210,14 +7210,15 @@ var IndoorRouter = (function () {
                 return this.selectModels(taskType)[0];
             },
 
-            /* 单次调用（带模型路由 + 自动降级重试） */
-            call: function (messages, taskType, cb) {
+            /* 单次调用（带模型路由 + 自动降级重试）；opts.timeout 可覆盖单模型超时 */
+            call: function (messages, taskType, cb, opts) {
                 var self = this;
                 var providers = enabledProviders();
                 if (!providers.length) { cb(new Error("no_ai_provider"), null); return; }
                 var provider = providers[0];
                 var models = self.selectModels(taskType);
                 var idx = 0;
+                var timeoutMs = (opts && opts.timeout) || 0;
                 function tryNext() {
                     if (idx >= models.length) { cb(new Error("all_models_failed"), null); return; }
                     var model = models[idx++];
@@ -7226,9 +7227,46 @@ var IndoorRouter = (function () {
                         /* 失败（含 402 付费墙/超时）→ 降级到下一个模型 */
                         console.warn("[AI Router] model " + model + " failed: " + (err && err.message) + ", trying fallback…");
                         tryNext();
-                    }, model);
+                    }, model, timeoutMs);
                 }
                 tryNext();
+            },
+
+            /* 并行竞速：多个任务路由的首模型同时发请求，谁先给出有效结果就用谁。
+             * 用于分析类小 JSON（尾延迟砍半），避免串行降级把 3×15s 叠起来。 */
+            race: function (messages, taskTypes, cb, opts) {
+                var self = this;
+                var providers = enabledProviders();
+                if (!providers.length) { cb(new Error("no_ai_provider"), null); return; }
+                var provider = providers[0];
+                var tasks = (taskTypes || []).filter(Boolean);
+                if (!tasks.length) { cb(new Error("no_task"), null); return; }
+                var settled = false, failed = 0;
+                var timeoutMs = (opts && opts.timeout) || WQ_AI_CONFIG.timeout;
+                function failOne() {
+                    if (settled) return;
+                    failed++;
+                    if (failed >= tasks.length) {
+                        settled = true;
+                        self.call(messages, tasks[0], cb, opts);
+                    }
+                }
+                tasks.forEach(function (tt) {
+                    var model = self.selectModels(tt)[0];
+                    try {
+                        self._callProvider(provider, messages, function (err, res) {
+                            if (settled) return;
+                            if (!err && res && res.text) { settled = true; cb(null, res); return; }
+                            failOne();
+                        }, model, timeoutMs);
+                    } catch (e) { failOne(); }
+                });
+                /* 竞速统一看门狗：超时仍未成功则走一次正常串行降级 */
+                setTimeout(function () {
+                    if (settled) return;
+                    settled = true;
+                    self.call(messages, tasks[0], cb, opts);
+                }, timeoutMs + 500);
             },
 
             /* 流式调用（SSE）：onChunk(accText, delta) 每收到一个 chunk 回调一次，实现秒级首字 */
@@ -7260,7 +7298,8 @@ var IndoorRouter = (function () {
                     }
                     var model = models[idx++];
                     self._callStream(provider, messages, model, forward, function (err, fullText) {
-                        if (!err && fullText != null) { finish(null, { provider: provider.name, text: fullText }); return; }
+                        /* 空响应视为失败：换下一个模型重试，避免"生成不出" */
+                        if (!err && fullText != null && String(fullText).trim()) { finish(null, { provider: provider.name, text: fullText }); return; }
                         console.warn("[AI Router] stream model " + model + " failed: " + (err && err.message) + ", trying fallback…");
                         /* 已经展示给用户的内容绝不换模型重来（否则两种说法来回闪烁） */
                         if (emitted) { finish(null, { provider: provider.name, text: lastAcc }); return; }
@@ -7369,7 +7408,7 @@ var IndoorRouter = (function () {
 
             /* 调用单个 Provider —— 通过 Pages Function 代理转发（规避 CORS），
              * Tencent 跨境失败时自动降级到 Cloudflare Workers AI 内网调用 */
-            _callProvider: function (provider, messages, cb, modelOverride) {
+            _callProvider: function (provider, messages, cb, modelOverride, timeoutMs) {
                 var model = modelOverride || provider.model;
                 /* 先尝试 Tencent TokenHub */
                 var url = WQ_AI_CONFIG.proxyEndpoint || "/api/chat";
@@ -7385,7 +7424,7 @@ var IndoorRouter = (function () {
                 var timer = setTimeout(function () {
                     timedOut = true;
                     tryCfFallback();
-                }, WQ_AI_CONFIG.timeout);
+                }, timeoutMs || WQ_AI_CONFIG.timeout);
 
                 function done(err, res) {
                     if (cbDone) return;
@@ -7550,7 +7589,12 @@ var IndoorRouter = (function () {
                 { role: "user", content: userContent }
             ];
             var taskType = imgList.length ? "vision" : "analyze";
-            WQ_AI_ROUTER.call(messages, taskType, function (err, res) {
+            /* 分析是小 JSON：文本题让 flash 与 pro 并行竞速，谁先给出有效结果就用谁，尾延迟砍半；
+             * 图片题仍走视觉模型（单路，避免重复上传大图） */
+            var _doCall = imgList.length
+                ? function (handler) { WQ_AI_ROUTER.call(messages, "vision", handler, { timeout: 15000 }); }
+                : function (handler) { WQ_AI_ROUTER.race(messages, ["analyze", "explain"], handler, { timeout: 9000 }); };
+            _doCall(function (err, res) {
                 if (err) { cb(err, null); return; }
                 var result = null;
                 try {
@@ -8060,15 +8104,38 @@ var IndoorRouter = (function () {
                 };
             }
 
-            /* 容错解析：优先完整数组；输出被截断时逐个抠出完整对象，尽量多救回几道 */
+            /* 容错解析：优先完整数组；流式/截断时用「括号配对扫描」逐个抠出完整对象，
+             * 能正确跳过字符串里的 LaTeX 花括号（\\frac{1}{2}），尽量多救回几道 */
+            function scanJsonObjects(s) {
+                var out = [], depth = 0, start = -1, inStr = false, esc = false;
+                for (var i = 0; i < s.length; i++) {
+                    var ch = s.charAt(i);
+                    if (inStr) {
+                        if (esc) { esc = false; continue; }
+                        if (ch === "\\") { esc = true; continue; }
+                        if (ch === "\"") inStr = false;
+                        continue;
+                    }
+                    if (ch === "\"") { inStr = true; continue; }
+                    if (ch === "{") { if (depth === 0) start = i; depth++; continue; }
+                    if (ch === "}") {
+                        if (depth > 0) {
+                            depth--;
+                            if (depth === 0 && start >= 0) { out.push(s.slice(start, i + 1)); start = -1; }
+                        }
+                    }
+                }
+                return out;
+            }
             function parseBatch(raw) {
+                var s = String(raw || "");
                 var arr = [];
-                try { arr = extractJsonArray(raw) || []; } catch (e) { arr = []; }
+                try { arr = extractJsonArray(s) || []; } catch (e) { arr = []; }
                 if (!arr.length) {
-                    var re = /\{[\s\S]*?\}/g, mm;
-                    while ((mm = re.exec(String(raw || ""))) !== null) {
+                    var objs = scanJsonObjects(s);
+                    for (var i = 0; i < objs.length; i++) {
                         try {
-                            var o = JSON.parse(sanitizeJsonBackslashes(mm[0]));
+                            var o = JSON.parse(sanitizeJsonBackslashes(objs[i]));
                             if (o && o.text) arr.push(o);
                         } catch (e2) { /* 跳过残缺对象 */ }
                     }
@@ -8076,8 +8143,8 @@ var IndoorRouter = (function () {
                 return arr;
             }
 
-            /* 并行批生成：总耗时≈单次调用，避免逐档串行拖慢 */
-            function genBatch(tiers, done, task) {
+            /* 并行批生成：总耗时≈单次调用；流式边生成边交付，第一道题 2-4s 就能上屏 */
+            function genBatch(tiers, done, task, onPartial) {
                 var need = tiers.map(function (t) { return "「" + t.label + "」：" + t.hint; }).join("\n");
                 var sys = "你是一位" + subName + "命题专家，负责命制分层练习题。" +
                     "\n【本次只出 " + tiers.length + " 道】按下列档位各出 1 道：\n" + need +
@@ -8089,16 +8156,30 @@ var IndoorRouter = (function () {
                     "\n只返回 JSON 数组，不要任何解释文字：[{\"text\":\"题干\",\"answer\":\"最终答案\",\"idea\":\"思路\",\"solution\":\"完整详细解答\",\"layer\":\"档位名\"}]";
                 var user = "学科：" + subName + "\n母知识点：" + kpList + "\n原题：" + text + "\n目标难度：L" + target +
                     "\n请按顺序生成 " + tiers.length + " 道题：" + tiers.map(function (t) { return t.label; }).join("、") + "。";
-                /* pipeline 首选 flash 模型：生成快；失败时由调用方切换其他路由重试 */
-                WQ_AI_ROUTER.call([{ role: "system", content: sys }, { role: "user", content: user }], task || "pipeline", function (err, res) {
-                    if (err || !res || !res.text) { done([]); return; }
-                    var arr = parseBatch(res.text);
+                var msgs = [{ role: "system", content: sys }, { role: "user", content: user }];
+                function pack(arr, provider) {
                     var out = [];
                     for (var i = 0; i < arr.length && i < tiers.length; i++) {
-                        var q = normalize(arr[i], tiers[i], res.provider);
+                        var q = normalize(arr[i], tiers[i], provider);
                         if (q) out.push(q);
                     }
-                    done(out);
+                    return out;
+                }
+                var acc = "", lastCount = 0;
+                /* pipeline 首选 flash 模型：流式生成，边出边交付 */
+                WQ_AI_ROUTER.callStream(msgs, task || "pipeline", function (streamText) {
+                    acc = streamText || acc;
+                    if (!onPartial || !acc) return;
+                    var arr = parseBatch(acc);
+                    if (arr.length <= lastCount) return;
+                    lastCount = arr.length;
+                    var part = pack(arr, "AI");
+                    if (part.length) { try { onPartial(part); } catch (e) { /* 忽略渲染异常 */ } }
+                }, function (err, res) {
+                    var raw = (res && res.text) || acc;
+                    if (err && !raw) { done([]); return; }
+                    var arr = parseBatch(raw);
+                    done(pack(arr, (res && res.provider) || "AI"));
                 });
             }
 
@@ -8147,6 +8228,21 @@ var IndoorRouter = (function () {
             }
 
             var pending = 2, retried = false, retryTasks = ["analyze", "generate"], retryIdx = 0, retrying = false;
+            var batchMap = {}, lastSig = "";
+            function mergedNow() { return mergeWQRecs(aiQs, localRecs, text, target); }
+            function sigOf(list) {
+                return list.map(function (q) { return String(q.text || "").slice(0, 48); }).join("|");
+            }
+            /* 边生成边交付：每多出一道题就增量上屏，第一道题 2-4s 就能看到 */
+            function deliverPartial() {
+                var merged = mergedNow();
+                if (!merged.length) return;
+                var sig = sigOf(merged);
+                if (sig === lastSig) return;
+                lastSig = sig;
+                delivered = true;
+                cb(null, merged);
+            }
             function finishFirst() {
                 /* AI 结果只升级一次；即使 8 秒红线已先兜底、20 秒已显示重试，AI 晚到仍静默补齐 */
                 if (aiFinished) return;
@@ -8154,16 +8250,19 @@ var IndoorRouter = (function () {
                 delivered = true;
                 clearTimeout(guard);
                 clearTimeout(hardGuard);
-                var three = mergeWQRecs(aiQs, localRecs, text, target);
+                var three = mergedNow();
                 /* 仅当三道都来自 AI 时才缓存，避免把兜底内容缓存成正式题目 */
                 if (aiQs.length >= 3) wqSaveRecCache(cacheKey, three);
-                /* 首轮结果立即交付：有几道展示几道，不足由后台校验/重试补齐 */
-                cb(null, three);
+                var sig = sigOf(three);
+                if (sig !== lastSig) { lastSig = sig; cb(null, three); }
                 /* 后台校验：发现不合格题目时静默替换，不打断阅读 */
                 verifyAndRepair(aiQs.slice(0, 3), function (fixed) {
                     if (!fixed || !fixed.length) return;
                     var merged = mergeWQRecs(aiQs.map(function (q, i) { return fixed[i] || q; }), localRecs, text, target);
                     if (aiQs.length >= 3) wqSaveRecCache(cacheKey, merged);
+                    var s2 = sigOf(merged);
+                    if (s2 === lastSig) return;
+                    lastSig = s2;
                     cb(null, merged);
                 });
             }
@@ -8179,20 +8278,31 @@ var IndoorRouter = (function () {
                     if (aiQs.length) finishFirst(); else retryAll();
                 }, task);
             }
-            function onBatch(qs) {
-                aiQs = aiQs.concat(qs || []);
-                if (--pending > 0) return;
-                /* 两批全空：换模型链路重试，而不是直接放弃 */
-                if (!aiQs.length && !retried) {
-                    retried = true;
-                    retryAll();
-                    return;
-                }
-                finishFirst();
+            function rebuildAiQs() {
+                aiQs = [].concat(batchMap.b1 || [], batchMap.b2 || []);
+            }
+            function onPartialBatch(bid, qs) {
+                batchMap[bid] = qs || [];
+                rebuildAiQs();
+                deliverPartial();
+            }
+            function onBatch(bid) {
+                return function (qs) {
+                    batchMap[bid] = qs || [];
+                    rebuildAiQs();
+                    if (--pending > 0) { deliverPartial(); return; }
+                    /* 两批全空：换模型链路重试，而不是直接放弃 */
+                    if (!aiQs.length && !retried) {
+                        retried = true;
+                        retryAll();
+                        return;
+                    }
+                    finishFirst();
+                };
             }
 
-            genBatch([WQ_REC_TIERS[0], WQ_REC_TIERS[1]], onBatch, "pipeline");
-            genBatch([WQ_REC_TIERS[2]], onBatch, "pipeline");
+            genBatch([WQ_REC_TIERS[0], WQ_REC_TIERS[1]], onBatch("b1"), "pipeline", function (part) { onPartialBatch("b1", part); });
+            genBatch([WQ_REC_TIERS[2]], onBatch("b2"), "pipeline", function (part) { onPartialBatch("b2", part); });
         }
 
         /* 合并 AI 推荐题与本地题库兜底题，去重后固定取 3 道 */
@@ -9722,6 +9832,8 @@ var IndoorRouter = (function () {
             _wqRecsDelivered = false;
             /* 开启新分析轮次：旧轮次的异步回调（分析/讲解/推题）将全部失效 */
             var _myRun = _wqNewRun();
+            /* 分析只允许结算一次：超时兜底后再晚到的 AI 结果必须丢弃，避免界面二次重绘闪烁 */
+            var _analysisDone = false;
 
             /* === 立即展示结果面板骨架，学科/知识点由 AI 判断（显示分析中占位） === */
             var _backBtn = document.getElementById("wqBackToList");
@@ -9737,8 +9849,8 @@ var IndoorRouter = (function () {
             document.getElementById("wqAiResult").style.display = "block";
 
             /* === 学科/知识点/难度 全部由 AI 判断 === */
-            /* 纯文本超时 20s；含图片（长图切片+视觉识别较慢）放宽到 30s */
-            var _analyzeTimeoutMs = _wqImgs.length ? 30000 : 20000;
+            /* 纯文本 12s 内必出结果（竞速 + 规则兜底）；含图片放宽到 18s */
+            var _analyzeTimeoutMs = _wqImgs.length ? 18000 : 12000;
             var aiTimeout = setTimeout(function () {
                 if (!_wqIsCurrentRun(_myRun)) return;
                 console.warn("[WQ] AI 分析超时，切换规则兜底");
@@ -9748,6 +9860,8 @@ var IndoorRouter = (function () {
             /* 规则兜底：只有拿到「题目原文」才继续走后续生成；拿不到就明确提示，不留空题 */
             function fallbackRule() {
                 if (!_wqIsCurrentRun(_myRun)) return;
+                if (_analysisDone) return;
+                _analysisDone = true;
                 if (aiTimeout) { clearTimeout(aiTimeout); aiTimeout = null; }
                 var qText = _textIsQuestion ? (text || "").trim() : "";
                 if (!qText) {
@@ -9783,12 +9897,14 @@ var IndoorRouter = (function () {
                 _visionImgs = visionImgs || [];
             aiAnalyzeQuestion(text, function (err, aiResult) {
                 if (!_wqIsCurrentRun(_myRun)) return; /* 旧轮次：丢弃，防止串题 */
+                if (_analysisDone) return; /* 已超时兜底结算：晚到的 AI 结果丢弃，避免二次重绘 */
                 if (aiTimeout) { clearTimeout(aiTimeout); aiTimeout = null; }
                 if (err || !aiResult) {
                     /* AI 失败 → 规则兜底（拿不到题目原文时明确提示，不生成空题） */
                     fallbackRule();
                     return;
                 }
+                _analysisDone = true;
                 /* 多题检测到 → 切换多题模式 */
                 if (Array.isArray(aiResult.questions) && aiResult.questions.length > 1) {
                     if (aiBtn) { aiBtn.disabled = false; aiBtn.textContent = "🔍 分析题目"; }
@@ -12230,21 +12346,28 @@ var IndoorRouter = (function () {
             var REVIEW_Q_COUNT = 3;  /* 每次恒定3道复习题 */
             /* 打开测验弹窗，显示加载中 */
             showWQReviewQuizModal(true);
-            /* 秒级响应：先用【题库中同母知识点、难度≈L+2 的真实新题】铺满（绝不复用错题原题） */
-            var localQuiz = buildLocalReviewQuiz(items, REVIEW_Q_COUNT, kps, targetDiff, subjects, sourceTexts);
-            if (localQuiz && localQuiz.questions.length) {
-                _wqReviewQuiz = { questions: localQuiz.questions, sourceItems: items, answers: [], current: 0, subjects: subjects, _local: true };
-                renderWQReviewQuizQuestion();
-            }
-            /* AI 命题：以母知识点为根出 L+2 新题；失败自动换任务模型重试，本地新题不打断 */
+            /* 直接调用 AI：3 道题并行生成，谁先出就先把哪道题渲染上屏（首题 2-4s），不再等题库 */
             if (WQ_AI_CONFIG.enabled && enabledProviders().length) {
                 var _quizTasks = ["pipeline", "generate"], _quizTry = 0;
                 /* 12 秒硬截止：界面绝不无限停在"正在生成"，到点给重试入口；AI 晚到仍会替换 */
                 var _quizDeadline = setTimeout(function () {
                     if (!document.getElementById("wqQuizBody")) return;
                     if (_wqReviewQuiz && _wqReviewQuiz.questions && _wqReviewQuiz.questions.length) return;
-                    showWQReviewQuizError("复习题生成超时，题库也暂无同母知识点的新题<br><span style=\"font-size:12px;color:#64748b\">可点击下方重试，或先做错题本里的原题</span>", true);
+                    showWQReviewQuizError("复习题生成超时<br><span style=\"font-size:12px;color:#64748b\">可点击下方重试</span>", true);
                 }, 12000);
+                /* 逐题上屏：AI 每产出一道就立刻渲染，用户不用等全部生成完 */
+                function acceptAIQuestion(obj) {
+                    if (!document.getElementById("wqQuizBody")) return;
+                    var started = _wqReviewQuiz && ((_wqReviewQuiz.answers && _wqReviewQuiz.answers.length) || _wqReviewQuiz.current > 0);
+                    if (started) return; /* 用户已开始作答，不再插入新题 */
+                    clearTimeout(_quizDeadline);
+                    if (!_wqReviewQuiz || !_wqReviewQuiz.questions || !_wqReviewQuiz.questions.length) {
+                        _wqReviewQuiz = { questions: [obj], sourceItems: items, answers: [], current: 0, subjects: subjects };
+                        renderWQReviewQuizQuestion();
+                    } else {
+                        _wqReviewQuiz.questions.push(obj);
+                    }
+                }
                 function tryAI() {
                     aiGenerateReviewQuiz(subjects, kps, targetDiff, REVIEW_Q_COUNT, function (err, quiz) {
                         /* 弹窗已被关闭则丢弃，避免串题 */
@@ -12254,93 +12377,31 @@ var IndoorRouter = (function () {
                             if (_quizTry < _quizTasks.length) { tryAI(); return; }
                             clearTimeout(_quizDeadline);
                             if (!(_wqReviewQuiz && _wqReviewQuiz.questions && _wqReviewQuiz.questions.length)) {
-                                showWQReviewQuizError("AI 出题超时，题库也暂无同母知识点的新题<br><span style=\"font-size:12px;color:#64748b\">请检查网络后重试</span>", true);
+                                showWQReviewQuizError("AI 出题超时<br><span style=\"font-size:12px;color:#64748b\">请检查网络后重试</span>", true);
                             }
                             return;
                         }
                         clearTimeout(_quizDeadline);
-                        /* 用户已经开始作答则不打断，否则用 AI 题无缝替换本地题 */
+                        /* 用户已经开始作答则不打断 */
                         var started = _wqReviewQuiz && ((_wqReviewQuiz.answers && _wqReviewQuiz.answers.length) || _wqReviewQuiz.current > 0);
                         if (started) return;
                         var qs = quiz.questions.slice(0, REVIEW_Q_COUNT);
+                        /* 已经逐题上屏过：只静默补齐全部题目，不重新渲染，避免闪烁 */
+                        if (_wqReviewQuiz && _wqReviewQuiz.questions && _wqReviewQuiz.questions.length) {
+                            _wqReviewQuiz.questions = qs;
+                            return;
+                        }
                         _wqReviewQuiz = { questions: qs, sourceItems: items, answers: [], current: 0, subjects: subjects };
                         renderWQReviewQuizQuestion();
-                    }, sourceTexts, _quizTasks[_quizTry]);
+                    }, sourceTexts, _quizTasks[_quizTry], acceptAIQuestion);
                 }
                 tryAI();
-            } else if (!(_wqReviewQuiz && _wqReviewQuiz.questions && _wqReviewQuiz.questions.length)) {
+            } else {
                 showWQReviewQuizError("分析未启用，无法生成复习题");
             }
         }
-        /* 本地秒级复习题：从题库取【同母知识点、难度≈L+2】的真实新题做选择题
-         * 原则：复习测验必须是新题，绝不复用错题原题；题库无题时留空交给 AI，不拿原题凑数 */
-        function buildLocalReviewQuiz(items, count, kps, targetDiff, subjects, sourceTexts) {
-            var n = Math.min(3, Math.max(1, count || 3));
-            var target = Math.min(10, Math.max(1, targetDiff || 6));
-            var subject = (subjects && subjects.length) ? subjects[0] : "";
-            var kpList = kps || [];
-            var origAll = (sourceTexts && sourceTexts.length) ? sourceTexts.join(" ") :
-                (items || []).map(function (it) { return (it && (it.text || it.question)) || ""; }).join(" ");
-            var picks = [];
-            try {
-                /* wqLocalRecs 内部按 origDiff+1 计算目标难度，这里传 target-1 得到 L+2 的题库题 */
-                picks = wqLocalRecs(subject, kpList, target - 1, origAll) || [];
-            } catch (e) { picks = []; }
-            if (!picks.length) return null;
-            /* 再和每道错题原文逐一查重，确保复习题绝不是原题或其近似改写 */
-            var srcArr = (sourceTexts || []).filter(Boolean);
-            if (srcArr.length) {
-                picks = picks.filter(function (q) {
-                    for (var si = 0; si < srcArr.length; si++) {
-                        try { if (textSim(srcArr[si], q.text) > 0.6) return false; } catch (e) { /* 忽略 */ }
-                    }
-                    return true;
-                });
-            }
-            if (!picks.length) return null;
-            /* 干扰项池：全部取自题库其他题的真实答案（与正确答案不同） */
-            var answerPool = [];
-            try {
-                var all = (typeof WQ_PIPELINE_B !== "undefined" && WQ_PIPELINE_B.getAllQuestions) ? (WQ_PIPELINE_B.getAllQuestions() || []) : [];
-                for (var i = 0; i < all.length && answerPool.length < 40; i++) {
-                    var a = String((all[i] && all[i].answer) || "").trim().split("\n")[0].slice(0, 60);
-                    if (a && answerPool.indexOf(a) < 0) answerPool.push(a);
-                }
-            } catch (e) { /* 题库不可用时用通用干扰项 */ }
-            var generic = ["条件不足，无法确定", "结论与题设无关", "需要补充额外条件", "上述说法均不正确"];
-            var out = [];
-            for (var p = 0; p < picks.length && out.length < n; p++) {
-                var q = picks[p] || {};
-                var correct = String(q.answer || "").trim().split("\n")[0].slice(0, 60);
-                if (!correct || !q.text) continue;   /* 没有真实答案的题不出选择题，避免编造正确项 */
-                var opts = [correct];
-                for (var k = 0; k < answerPool.length && opts.length < 4; k++) {
-                    if (answerPool[k] !== correct && opts.indexOf(answerPool[k]) < 0) opts.push(answerPool[k]);
-                }
-                for (var g = 0; g < generic.length && opts.length < 4; g++) {
-                    if (opts.indexOf(generic[g]) < 0) opts.push(generic[g]);
-                }
-                /* 打乱选项并记录正确项索引 */
-                for (var s = opts.length - 1; s > 0; s--) {
-                    var r = Math.floor(Math.random() * (s + 1));
-                    var tmp = opts[s]; opts[s] = opts[r]; opts[r] = tmp;
-                }
-                var ansIdx = opts.indexOf(correct);
-                if (ansIdx < 0) ansIdx = 0;
-                out.push({
-                    q: q.text,
-                    options: opts,
-                    answer: ansIdx,
-                    explain: "答案：" + correct + "\n" + (q.solution || q.idea || "请对照题库原解析核对。"),
-                    needImg: false,
-                    imgDesc: ""
-                });
-            }
-            if (!out.length) return null;
-            return { questions: out };
-        }
-        /* AI生成复习选择题 */
-        function aiGenerateReviewQuiz(subjects, kps, diff, count, cb, sourceTexts, task) {
+        /* AI 生成复习选择题：3 道并行请求（各出 1 道），谁先出就先用，首题 2-4s 上屏 */
+        function aiGenerateReviewQuiz(subjects, kps, diff, count, cb, sourceTexts, task, onEach) {
             var subj = (subjects && subjects.length) ? subjects.join("、") : "综合";
             var kpList = (kps && kps.length) ? kps.join("、") : "相关知识点";
             var n = Math.min(8, Math.max(3, count));
@@ -12360,66 +12421,77 @@ var IndoorRouter = (function () {
                 anchorTip = "\n【错题原文（只用于定位母知识点，严禁照抄、严禁只改数字或换符号）】\n" +
                     sourceTexts.map(function (t, i) { return (i + 1) + ". " + (t || "").slice(0, 200); }).join("\n");
             }
-            var sysPrompt = "你是一位资深命题专家。请以错题涉及的【母知识点】为根，生成 " + n + " 道全新的单项选择题。" +
-                "【命题原则】" +
-                "① 母知识点为根：" + kpList + "。先回到该知识点最本质的定义/定理/公式，再向外延伸（变式迁移、综合应用、拓展探究），严禁出与该知识点无关的题。" +
-                "② 难度严格定为 L" + target + "（1-10 级）。原错题最高为 L" + baseDiff + "，本次统一提升 2 级；不得低于 L" + target + "，也不得明显超出。" +
-                "③ 必须是全新题：严禁照抄错题原文，严禁只改数字/换符号的伪变式；" + n + " 道题必须覆盖不同考查角度。" +
-                "④ 四个选项必须互斥、有区分度且只有一个正确；错误选项要模拟学生的真实易错结果（漏符号、漏条件、公式误用、边界遗漏等），不要用明显荒谬项凑数。" +
-                "⑤ explain 必须写透：先给正确结论，再写关键步骤与所用定理/公式，最后指出每个错误选项错在哪；不受字数限制。" +
-                "⑥ 需要配图的题（几何图形、电路图、实验装置等）needImg=true，imgDesc 用一句话描述图。" +
-                "严格按 JSON 返回：{\"questions\":[{\"q\":\"题干\",\"options\":[\"A\",\"B\",\"C\",\"D\"],\"answer\":0,\"explain\":\"解析\",\"needImg\":false,\"imgDesc\":\"\"}]}，answer 为正确选项索引(0-3)。" +
-                anchorTip + historyTip;
-            var messages = [
-                { role: "system", content: sysPrompt },
-                { role: "user", content: "学科：" + subj + "\n母知识点：" + kpList + "\n目标难度：L" + target + "\n请出 " + n + " 道新题。" }
-            ];
-            WQ_AI_ROUTER.call(messages, task || "pipeline", function (err, res) {
-                if (err) { cb(err, null); return; }
-                try {
-                    var raw = res.text;
-                    var m = raw.match(/\{[\s\S]*\}/);
-                    var obj = null;
-                    if (m) {
-                        try { obj = JSON.parse(m[0]); }
-                        catch (e1) { try { obj = JSON.parse(sanitizeJsonBackslashes(m[0])); } catch (e2) { obj = null; } }
+            var angles = ["母概念辨析", "变式迁移", "综合应用", "易错边界", "拓展探究", "逆向推理", "跨知识点联系", "实际情境建模"];
+            var _fillOpts = ["条件不足，无法确定", "结论与题设无关", "需要补充额外条件", "上述说法均不正确"];
+            var got = [], need = n, finished = false;
+            function parseOne(raw) {
+                var s = String(raw || ""), obj = null;
+                var m = s.match(/\{[\s\S]*\}/);
+                if (m) {
+                    try { obj = JSON.parse(m[0]); }
+                    catch (e1) { try { obj = JSON.parse(sanitizeJsonBackslashes(m[0])); } catch (e2) { obj = null; } }
+                }
+                var q = null;
+                if (obj && Array.isArray(obj.questions) && obj.questions.length) q = obj.questions[0];
+                else if (obj && obj.q) q = obj;
+                if (!q || !q.q || !Array.isArray(q.options) || q.options.length < 2) return null;
+                /* 容错：选项数不是 4 时补齐/截断，answer 越界归 0，避免整题被丢弃 */
+                var opts = q.options.slice(0, 6).map(function (o) { return String(o); });
+                for (var f = 0; opts.length < 4; f++) {
+                    if (opts.indexOf(_fillOpts[f % _fillOpts.length]) < 0) opts.push(_fillOpts[f % _fillOpts.length]);
+                    else opts.push(_fillOpts[(f + 1) % _fillOpts.length] + "（备选）");
+                }
+                var ai2 = parseInt(q.answer, 10);
+                if (!(ai2 >= 0 && ai2 < opts.length)) ai2 = 0;
+                return { q: String(q.q), options: opts, answer: ai2, explain: String(q.explain || ""), needImg: !!q.needImg, imgDesc: String(q.imgDesc || "") };
+            }
+            function finish() {
+                if (finished) return;
+                finished = true;
+                if (!got.length) { cb(new Error("parse_failed"), null); return; }
+                /* 去重（并行请求可能撞题） */
+                var uniq = [];
+                for (var i = 0; i < got.length; i++) {
+                    var dup = false;
+                    for (var j = 0; j < uniq.length; j++) {
+                        try { if (textSim(got[i].q, uniq[j].q) > 0.85) { dup = true; break; } } catch (e) {}
                     }
-                    /* 兜底：整体 JSON 解析失败时，单独抠出 questions 数组 */
-                    if (!obj) {
-                        var qm = /"questions"\s*:\s*(\[[\s\S]*\])/.exec(raw);
-                        if (qm) {
-                            try {
-                                var qarr = JSON.parse(sanitizeJsonBackslashes(qm[1]));
-                                if (Array.isArray(qarr) && qarr.length) obj = { questions: qarr };
-                            } catch (e3) { /* 忽略 */ }
+                    if (!dup) uniq.push(got[i]);
+                }
+                var newHistory = (history || []).concat(uniq.map(function (q) { return { q: q.q.slice(0, 100), ts: Date.now() }; }));
+                if (newHistory.length > 30) newHistory = newHistory.slice(-30);
+                try { localStorage.setItem("wq_quiz_history", JSON.stringify(newHistory)); } catch (e) {}
+                cb(null, { questions: uniq.slice(0, n) });
+            }
+            function one(k) {
+                var angle = angles[k % angles.length];
+                var sysPrompt = "你是一位资深命题专家。本次只出 1 道全新的单项选择题，以错题涉及的【母知识点】为根。" +
+                    "【命题原则】" +
+                    "① 母知识点为根：" + kpList + "。先回到该知识点最本质的定义/定理/公式，再向外延伸，严禁出无关题。" +
+                    "② 难度严格定为 L" + target + "（1-10 级）。原错题最高为 L" + baseDiff + "，本次统一提升 2 级；不得低于 L" + target + "，也不得明显超出。" +
+                    "③ 必须是全新题：严禁照抄错题原文，严禁只改数字/换符号的伪变式；本题侧重「" + angle + "」。" +
+                    "④ 四个选项互斥、有区分度且只有一个正确；错误选项要模拟学生真实易错结果，不要用明显荒谬项凑数。" +
+                    "⑤ explain 必须写透：先给正确结论，再写关键步骤与所用定理/公式，最后指出每个错误选项错在哪；不受字数限制。" +
+                    "⑥ 需要配图的题 needImg=true，imgDesc 用一句话描述图。" +
+                    "严格按 JSON 返回：{\"questions\":[{\"q\":\"题干\",\"options\":[\"A\",\"B\",\"C\",\"D\"],\"answer\":0,\"explain\":\"解析\",\"needImg\":false,\"imgDesc\":\"\"}]}，answer 为正确选项索引(0-3)。" +
+                    anchorTip + historyTip;
+                var messages = [
+                    { role: "system", content: sysPrompt },
+                    { role: "user", content: "学科：" + subj + "\n母知识点：" + kpList + "\n目标难度：L" + target + "\n本次侧重：" + angle + "\n请只出 1 道新题。" }
+                ];
+                WQ_AI_ROUTER.call(messages, task || "pipeline", function (err, res) {
+                    if (!err && res && res.text) {
+                        var obj = null;
+                        try { obj = parseOne(res.text); } catch (e) { obj = null; }
+                        if (obj) {
+                            got.push(obj);
+                            if (typeof onEach === "function") { try { onEach(obj, got.length - 1); } catch (e) {} }
                         }
                     }
-                    if (obj && Array.isArray(obj.questions) && obj.questions.length) {
-                        var _fillOpts = ["条件不足，无法确定", "结论与题设无关", "需要补充额外条件", "上述说法均不正确"];
-                        obj.questions = obj.questions.filter(function (q) {
-                            return q && q.q && Array.isArray(q.options) && q.options.length >= 2;
-                        }).map(function (q) {
-                            /* 容错：选项数不是 4 时补齐/截断，answer 越界归 0，避免整题被丢弃 */
-                            var opts = q.options.slice(0, 6).map(function (o) { return String(o); });
-                            for (var f = 0; opts.length < 4; f++) {
-                                if (opts.indexOf(_fillOpts[f % _fillOpts.length]) < 0) opts.push(_fillOpts[f % _fillOpts.length]);
-                                else opts.push(_fillOpts[(f + 1) % _fillOpts.length] + "（备选）");
-                            }
-                            var ai2 = parseInt(q.answer, 10);
-                            if (!(ai2 >= 0 && ai2 < opts.length)) ai2 = 0;
-                            q.options = opts; q.answer = ai2;
-                            return q;
-                        });
-                        /* 保存本次出题主键到历史（最多存30条） */
-                        var newHistory = (history || []).concat(obj.questions.map(function (q) {
-                            return { q: q.q.slice(0, 100), ts: Date.now() };
-                        }));
-                        if (newHistory.length > 30) newHistory = newHistory.slice(-30);
-                        try { localStorage.setItem("wq_quiz_history", JSON.stringify(newHistory)); } catch (e) {}
-                        cb(null, obj);
-                    } else { cb(new Error("parse_failed"), null); }
-                } catch (e) { cb(e, null); }
-            });
+                    if (--need === 0) finish();
+                }, { timeout: 12000 });
+            }
+            for (var k = 0; k < n; k++) one(k);
         }
         /* 复习测验弹窗 */
         function showWQReviewQuizModal(loading) {
