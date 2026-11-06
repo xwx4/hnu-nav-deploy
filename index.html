@@ -7289,10 +7289,14 @@ var IndoorRouter = (function () {
                 /* opts.primaryModel / opts.hedgeModel：允许调用方指定模型对，
                  * 避免两条并发生成任务抢同一个模型互相拖慢 */
                 var primaryModel = (opts && opts.primaryModel) || list[0];
+                var noHedge = !!(opts && opts.noHedge);
                 var hedgeModel = (opts && opts.hedgeModel) || (tasks[1] ? self.selectModels(tasks[1])[0] : null);
                 /* 对冲模型与主模型重合时，改用主模型的第二备选，保证一定有第二条路 */
                 if (!hedgeModel || hedgeModel === primaryModel) hedgeModel = list[1] || null;
                 if (hedgeModel === primaryModel) hedgeModel = null;
+                /* 多档批量生成时禁用对冲：备用模型常常只写完第一档就结束，
+                 * 抢跑会把主模型后面几档整批丢弃，反而更容易缺档 */
+                if (noHedge) hedgeModel = null;
                 var hedgeDelay = (opts && opts.hedgeDelay) || 2500;
                 var winner = null, done = false, started = {}, buf = {}, failed = 0;
                 var total = hedgeModel ? 2 : 1;
@@ -7312,14 +7316,17 @@ var IndoorRouter = (function () {
                         if (onChunk) onChunk(acc, delta);
                     }, function (err, fullText) {
                         if (done) return;
-                        var text = (fullText && String(fullText).trim()) ? fullText : buf[model];
-                        /* 谁先拿到完整有效结果谁收尾：即使它没抢到首字，也优先保证「一定出结果」，
-                         * 避免主模型只吐了半截就卡死、备选明明成功却被 winner 锁死丢弃 */
-                        if (text && String(text).trim()) {
-                            finish(null, { provider: provider.name, text: text, model: model });
+                        if (winner === model) {
+                            var text = (fullText && String(fullText).trim()) ? fullText : buf[model];
+                            if (text && String(text).trim()) { finish(null, { provider: provider.name, text: text, model: model }); }
+                            else { finish(new Error("all_models_failed"), null); }
                             return;
                         }
-                        if (winner === model) winner = null; /* 首字模型空手而归：让仍在跑的备选接手 */
+                        /* 没抢到首字的一路：主路还在跑就静默丢弃，
+                         * 主路已彻底失败（winner 已清空）时才允许它接手 */
+                        if (winner) return;
+                        var alt = (fullText && String(fullText).trim()) ? fullText : buf[model];
+                        if (alt && String(alt).trim()) { finish(null, { provider: provider.name, text: alt, model: model }); return; }
                         failed++;
                         if (failed >= total) finish(new Error("all_models_failed"), null);
                     });
@@ -8286,7 +8293,7 @@ var IndoorRouter = (function () {
                 /* 指定模型对：两条并发生成任务各用各的模型，避免抢同一个模型把首字拖到 20s+ */
                 var hopts = null;
                 if (prefer && prefer.length) {
-                    hopts = { primaryModel: prefer[0], hedgeModel: prefer[1] || null, hedgeDelay: 2500 };
+                    hopts = { primaryModel: prefer[0], hedgeModel: prefer[1] || null, hedgeDelay: 2500, noHedge: tiers.length > 1 };
                 }
                 /* pipeline 首选模型：流式生成，边出边交付 */
                 WQ_AI_ROUTER.hedgeStream(msgs, [task || "pipeline", "analyze"], function (streamText) {
@@ -8351,7 +8358,7 @@ var IndoorRouter = (function () {
             }
 
             var pending = 2, retried = false, retryTasks = ["analyze", "generate"], retryIdx = 0, retrying = false;
-            var batchMap = {}, lastSig = "", extraQs = [];
+            var batchMap = {}, batchDone = {}, lastSig = "", extraQs = [];
             function mergedNow() { return mergeWQRecs(aiQs, [], text, target); }
             function sigOf(list) {
                 return list.map(function (q) { return String(q.text || "").slice(0, 48); }).join("|");
@@ -8406,13 +8413,21 @@ var IndoorRouter = (function () {
                 aiQs = [].concat(batchMap.b1 || [], batchMap.b2 || [], extraQs);
             }
             /* 不足三道：后台只补缺失档位（全部来自 AI，绝不使用题库） */
-            function topUp(tries) {
+            function topUp(tries, missList) {
                 tries = tries || 0;
                 if (aiQs.length >= 3 || tries >= 5) return;
                 var have = {};
                 aiQs.forEach(function (q) { if (q._tierKey) have[q._tierKey] = 1; });
                 var miss = WQ_REC_TIERS.filter(function (t) { return !have[t.key]; });
-                if (!miss.length) miss = [WQ_REC_TIERS[2]];
+                if (missList && missList.length) {
+                    var picked = miss.filter(function (t) {
+                        for (var m = 0; m < missList.length; m++) { if (missList[m].key === t.key) return true; }
+                        return false;
+                    });
+                    if (!picked.length) return; /* 指定补的档位已经补齐 */
+                    miss = picked;
+                }
+                if (!miss.length) return;
                 genBatch(miss.slice(0, 3 - aiQs.length), function (qs) {
                     if (qs && qs.length) {
                         extraQs = extraQs.concat(qs);
@@ -8423,8 +8438,22 @@ var IndoorRouter = (function () {
                         if (sg !== lastSig) { lastSig = sg; cb(null, merged); }
                     }
                     /* 网关拥塞时按退避重试，直到三档补齐（仍然只走 AI） */
-                    if (aiQs.length < 3) setTimeout(function () { topUp(tries + 1); }, Math.min(8000, 1200 * Math.pow(2, tries)));
+                    if (aiQs.length < 3) setTimeout(function () { topUp(tries + 1, miss); }, Math.min(8000, 1200 * Math.pow(2, tries)));
                 }, "generate", null, PAIR_POOL[tries % PAIR_POOL.length]);
+            }
+            /* 某个批次已结束、而某档位既没产出也不在别的批次里生成 → 立刻补题，
+             * 不必等两批全部跑完（否则缺一档要白等 20s+） */
+            function maybeTopUp() {
+                if (aiQs.length >= 3 || topUpStarted) return;
+                var have = {};
+                aiQs.forEach(function (q) { if (q._tierKey) have[q._tierKey] = 1; });
+                var flying = {};
+                if (!batchDone.b1) { flying[WQ_REC_TIERS[0].key] = 1; flying[WQ_REC_TIERS[1].key] = 1; }
+                if (!batchDone.b2) { flying[WQ_REC_TIERS[2].key] = 1; }
+                var miss = WQ_REC_TIERS.filter(function (t) { return !have[t.key] && !flying[t.key]; });
+                if (!miss.length) return;
+                topUpStarted = true;
+                topUp(0, miss);
             }
             function onPartialBatch(bid, qs) {
                 batchMap[bid] = qs || [];
@@ -8434,7 +8463,9 @@ var IndoorRouter = (function () {
             function onBatch(bid) {
                 return function (qs) {
                     batchMap[bid] = qs || [];
+                    batchDone[bid] = true;
                     rebuildAiQs();
+                    maybeTopUp();
                     if (--pending > 0) { deliverPartial(); return; }
                     /* 两批全空：换模型链路重试，而不是直接放弃 */
                     if (!aiQs.length && !retried) {
@@ -8472,6 +8503,11 @@ var IndoorRouter = (function () {
             function push(q) {
                 if (!q || !q.text) return;
                 if (textSim(origText || "", q.text) > 0.6) return;
+                /* 同一档位只保留最先到达的一道：补题与主批次可能同时产出同一档，
+                 * 不去重就会出现两道「变式迁移」并把另一档挤掉 */
+                if (q._tierKey) {
+                    for (var t = 0; t < out.length; t++) { if (out[t] && out[t]._tierKey === q._tierKey) return; }
+                }
                 for (var i = 0; i < seen.length; i++) {
                     if (textSim(q.text, seen[i]) > 0.85) return;
                 }
