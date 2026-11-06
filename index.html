@@ -12309,14 +12309,23 @@ var IndoorRouter = (function () {
                 function acceptAIQuestion(obj) {
                     if (!document.getElementById("wqQuizBody")) return;
                     var started = _wqReviewQuiz && ((_wqReviewQuiz.answers && _wqReviewQuiz.answers.length) || _wqReviewQuiz.current > 0);
-                    if (started) return; /* 用户已开始作答，不再插入新题 */
+                    if (started) {
+                        /* 已开始作答：正常不插题；但如果用户已答完当前最后一题、
+                         * 正在等剩余题目，则把新题接上并立刻显示，避免测验提前结束 */
+                        if (_wqReviewQuiz && !_wqReviewQuiz._done && _wqReviewQuiz.current >= _wqReviewQuiz.questions.length) {
+                            _wqReviewQuiz.questions.push(obj);
+                            renderWQReviewQuizQuestion();
+                        }
+                        return;
+                    }
                     clearTimeout(_quizDeadline);
                     if (!_wqReviewQuiz || !_wqReviewQuiz.questions || !_wqReviewQuiz.questions.length) {
-                        _wqReviewQuiz = { questions: [obj], sourceItems: items, answers: [], current: 0, subjects: subjects };
-                        renderWQReviewQuizQuestion();
+                        _wqReviewQuiz = { questions: [obj], sourceItems: items, answers: [], current: 0, subjects: subjects, _loading: true };
                     } else {
                         _wqReviewQuiz.questions.push(obj);
                     }
+                    /* 每来一道就重渲染，让「第 x / N 题」的总题数实时更新 */
+                    renderWQReviewQuizQuestion();
                 }
                 function tryAI() {
                     aiGenerateReviewQuiz(subjects, kps, targetDiff, REVIEW_Q_COUNT, function (err, quiz) {
@@ -12336,12 +12345,14 @@ var IndoorRouter = (function () {
                         var started = _wqReviewQuiz && ((_wqReviewQuiz.answers && _wqReviewQuiz.answers.length) || _wqReviewQuiz.current > 0);
                         if (started) return;
                         var qs = quiz.questions.slice(0, REVIEW_Q_COUNT);
-                        /* 已经逐题上屏过：只静默补齐全部题目，不重新渲染，避免闪烁 */
+                        /* 已经逐题上屏过：只静默补齐全部题目，并刷新总题数 */
                         if (_wqReviewQuiz && _wqReviewQuiz.questions && _wqReviewQuiz.questions.length) {
                             _wqReviewQuiz.questions = qs;
+                            _wqReviewQuiz._loading = false;
+                            renderWQReviewQuizQuestion();
                             return;
                         }
-                        _wqReviewQuiz = { questions: qs, sourceItems: items, answers: [], current: 0, subjects: subjects };
+                        _wqReviewQuiz = { questions: qs, sourceItems: items, answers: [], current: 0, subjects: subjects, _loading: false };
                         renderWQReviewQuizQuestion();
                     }, sourceTexts, _quizTasks[_quizTry], acceptAIQuestion);
                 }
@@ -12398,12 +12409,14 @@ var IndoorRouter = (function () {
             function finish() {
                 if (finished) return;
                 if (!got.length) { finished = true; cb(new Error("parse_failed"), null); return; }
-                /* 去重（并行请求可能撞题） */
+                /* 去重（并行请求可能撞题）：只剔除逐字相同，避免把同知识点的不同题误判为重复 */
                 var uniq = [];
                 for (var i = 0; i < got.length; i++) {
+                    var ni = String(got[i].q || "").replace(/[\s，,。.；;：:！!？?、"'"'（）()\[\]【】]/g, "");
                     var dup = false;
                     for (var j = 0; j < uniq.length; j++) {
-                        try { if (textSim(got[i].q, uniq[j].q) > 0.85) { dup = true; break; } } catch (e) {}
+                        var nj = String(uniq[j].q || "").replace(/[\s，,。.；;：:！!？?、"'"'（）()\[\]【】]/g, "");
+                        if (ni === nj) { dup = true; break; }
                     }
                     if (!dup) uniq.push(got[i]);
                 }
@@ -12532,8 +12545,18 @@ var IndoorRouter = (function () {
                     /* 0.5秒后进入下一题 */
                     setTimeout(function () {
                         quiz.current++;
-                        if (quiz.current >= total) finishWQReviewQuiz();
-                        else renderWQReviewQuizQuestion();
+                        if (quiz.current < quiz.questions.length) { renderWQReviewQuizQuestion(); return; }
+                        if (quiz._loading) {
+                            /* 还有题目在生成：先显示等待，题目到达后自动接上；8 秒后仍无新题则以现有题目收尾 */
+                            if (body) body.innerHTML = '<div style="text-align:center;padding:32px;color:#64748b;font-size:14px">⏳ 正在生成剩余题目…</div>';
+                            setTimeout(function () {
+                                if (!document.getElementById("wqQuizBody") || quiz._done) return;
+                                if (quiz.current < quiz.questions.length) { renderWQReviewQuizQuestion(); return; }
+                                finishWQReviewQuiz();
+                            }, 8000);
+                            return;
+                        }
+                        finishWQReviewQuiz();
                     }, 400);
                 });
             });
@@ -12541,7 +12564,9 @@ var IndoorRouter = (function () {
         /* 完成测验，展示结果并基于权重分析建议删除 */
         function finishWQReviewQuiz() {
             var quiz = _wqReviewQuiz;
-            if (!quiz) return;
+            if (!quiz || quiz._done) return;
+            quiz._done = true;
+            quiz._loading = false;
             var body = document.getElementById("wqQuizBody");
             if (!body) return;
             var correct = 0;
