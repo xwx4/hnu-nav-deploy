@@ -7001,15 +7001,15 @@ var IndoorRouter = (function () {
             apiKey: "",
             /* 模型路由：根据任务类型选择最合适的模型（主模型 + 降级备选） */
             modelRouter: {
-                analyze:  ["hy3", "glm-5.3"],                              /* 学科/题型/难度/知识点分析（最快） */
-                explain:  ["glm-5.3", "hy3"],                              /* 讲透原题/母题/知识点（推理强） */
-                generate: ["glm-5.3", "hy3"],                              /* 生成推荐题/变式题（生成质量高） */
-                score:    ["hy3", "glm-5.3"],                              /* 质量评分/权威性判断 */
-                mother:   ["glm-5.3", "hy3"],                              /* 母题溯源 */
-                recommend:["glm-5.3", "hy3"],                              /* 分层推荐 */
-                pipeline: ["glm-5.3", "hy3"],                              /* 一站式讲解+母题+推题 */
-                current:  ["glm-5.3", "hy3"],                              /* 时效性问题 */
-                vision:   ["glm-5.3", "hy3"]                               /* 图片多模态识别 */
+                analyze:  ["hy3", "hy4"],                                   /* 学科/题型/难度/知识点分析（最快） */
+                explain:  ["glm-5.3", "deepseek-v4-pro-0813", "hy3"],       /* 讲透原题/知识点（效果优先） */
+                generate: ["glm-5.3", "kimi-k3", "hy3"],                    /* 生成推荐题/变式题 */
+                score:    ["hy3", "glm-5.3"],                               /* 质量评分/权威性判断 */
+                mother:   ["glm-5.3", "deepseek-v4-pro-0813", "hy3"],       /* 母题溯源 */
+                recommend:["glm-5.3", "kimi-k3", "hy3"],                    /* 分层推荐 */
+                pipeline: ["glm-5.3", "deepseek-v4-pro-0813", "hy3"],       /* 一站式讲解+母题+推题 */
+                current:  ["kimi-k3", "glm-5.3", "hy4"],                    /* 时效性问题 */
+                vision:   ["hy4", "glm-5.3"]                                /* 图片多模态识别 */
             },
             /* 默认 Provider（兼容旧逻辑） */
             providers: [
