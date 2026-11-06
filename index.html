@@ -7002,18 +7002,18 @@ var IndoorRouter = (function () {
             /* 模型路由：根据任务类型选择最合适的模型（主模型 + 降级备选） */
             modelRouter: {
                 analyze:  ["hy3", "hy4"],                                   /* 学科/题型/难度/知识点分析（最快） */
-                explain:  ["glm-5.3", "deepseek-v4-pro-0813", "hy3"],       /* 讲透原题/知识点（效果优先） */
-                generate: ["glm-5.3", "kimi-k3", "hy3"],                    /* 生成推荐题/变式题 */
-                score:    ["hy3", "glm-5.3"],                               /* 质量评分/权威性判断 */
-                mother:   ["glm-5.3", "deepseek-v4-pro-0813", "hy3"],       /* 母题溯源 */
-                recommend:["glm-5.3", "kimi-k3", "hy3"],                    /* 分层推荐 */
-                pipeline: ["glm-5.3", "deepseek-v4-pro-0813", "hy3"],       /* 一站式讲解+母题+推题 */
-                current:  ["kimi-k3", "glm-5.3", "hy4"],                    /* 时效性问题 */
-                vision:   ["hy4", "glm-5.3"]                                /* 图片多模态识别 */
+                explain:  ["hy3", "deepseek-v4-pro-0813", "hy4"],           /* 讲透原题/知识点（实测 hy3 最稳最快） */
+                generate: ["hy3", "deepseek-v4-pro-0813", "hy4"],           /* 生成推荐题/变式题 */
+                score:    ["hy3", "hy4"],                                   /* 质量评分/权威性判断 */
+                mother:   ["hy3", "deepseek-v4-pro-0813", "hy4"],           /* 母题溯源 */
+                recommend:["hy3", "deepseek-v4-pro-0813", "hy4"],           /* 分层推荐 */
+                pipeline: ["hy3", "deepseek-v4-pro-0813", "hy4"],           /* 一站式讲解+母题+推题 */
+                current:  ["kimi-k3", "hy3", "hy4"],                        /* 时效性问题 */
+                vision:   ["hy4", "hy3"]                                    /* 图片多模态识别 */
             },
             /* 默认 Provider（兼容旧逻辑） */
             providers: [
-                { id: "default", name: "Tencent-TokenHub", endpoint: "https://tokenhub.tencentmaas.com/v1/chat/completions", apiKey: "", model: "glm-5.3", enabled: true }
+                { id: "default", name: "Tencent-TokenHub", endpoint: "https://tokenhub.tencentmaas.com/v1/chat/completions", apiKey: "", model: "hy3", enabled: true }
             ],
             /* 评分权重（0-1） */
             scoreWeights: {
@@ -7031,7 +7031,11 @@ var IndoorRouter = (function () {
             /* 题库质量评分权重：AI(0.4) + 答案可验证(0.3) + 来源权威(0.2) + 去重(0.1) */
             qualityWeights: { ai: 0.4, answer: 0.3, source: 0.2, dedup: 0.1 },
             /* 超时（ms）—— 15s 未响应即降级，保证秒级体感 */
-            timeout: 15000
+            timeout: 15000,
+            /* 流式首字看门狗：12s 还没吐出第一个字就判定该模型卡死，立刻换下一个 */
+            streamFirstTokenTimeout: 12000,
+            /* 流式空闲看门狗：出字之后每段间隔超过 60s 才放弃 */
+            streamIdleTimeout: 60000
         };
 
         /* 从 localStorage 加载用户配置的 AI Provider（覆盖默认）；
@@ -7454,7 +7458,7 @@ var IndoorRouter = (function () {
                         if (!finished) finish(new Error("all_failed"), null);
                     });
                 }
-                armTimer();
+                armTimer(WQ_AI_CONFIG.streamFirstTokenTimeout || 12000);
                 fetch(url, {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
@@ -8223,7 +8227,7 @@ var IndoorRouter = (function () {
                     "\n【本次只出 " + tiers.length + " 道】按下列档位各出 1 道：\n" + need +
                     "\n【题源原则】必须扎根原题的母知识点：" + kpList + "。先回到最本质的知识点，再向外延伸；严禁出与原题无关的题。" +
                     "\n【难度铁律】每题难度严格为 L" + target + "（原题 L" + (origDiff || 5) + "，难度 +1）。不得只改数字、拆小问或截取原题片段；必须实质提升思维深度或步骤复杂度。" +
-                    "\n【答案写透铁律·重要】每题必须给完整可读解答：写清每一步推导依据、关键变形与最终结论；不因篇幅省略步骤，不设字数上限。禁止「略」「同上」「由此可见」等敷衍表述。" +
+                    "\n【答案写透铁律·重要】每题必须给完整可读解答：写清每一步推导依据、关键变形与最终结论；禁止「略」「同上」「由此可见」等敷衍表述。题干不重复、不堆套话，解答控制在 250~400 字，保证步骤完整且能快速返回。" +
                     "\n【措辞纪律】严禁「不对」「错了」「改为」「更正」「正解是」等自我纠错痕迹；不要提及资料、上传、图片等信息来源。" +
                     "\n【排版】公式一律用 $...$ 包裹，反斜杠命令必须完整（如 \\frac、\\sqrt、\\right）；代码用 ``` 围栏。" +
                     "\n只返回 JSON 数组，不要任何解释文字：[{\"text\":\"题干\",\"answer\":\"最终答案\",\"idea\":\"思路\",\"solution\":\"完整详细解答\",\"layer\":\"档位名\"}]";
@@ -12307,7 +12311,7 @@ var IndoorRouter = (function () {
                     "② 难度严格定为 L" + target + "（1-10 级）。原错题最高为 L" + baseDiff + "，本次统一提升 2 级；不得低于 L" + target + "，也不得明显超出。" +
                     "③ 必须是全新题：严禁照抄错题原文，严禁只改数字/换符号的伪变式；本题侧重「" + angle + "」。" +
                     "④ 四个选项互斥、有区分度且只有一个正确；错误选项要模拟学生真实易错结果，不要用明显荒谬项凑数。" +
-                    "⑤ explain 必须写透：先给正确结论，再写关键步骤与所用定理/公式，最后指出每个错误选项错在哪；不受字数限制。" +
+                    "⑤ explain 必须写透：先给正确结论，再写关键步骤与所用定理/公式，最后指出每个错误选项错在哪；控制在 150~250 字，步骤完整、不堆套话。" +
                     "⑥ 需要配图的题 needImg=true，imgDesc 用一句话描述图。" +
                     "严格按 JSON 返回：{\"questions\":[{\"q\":\"题干\",\"options\":[\"A\",\"B\",\"C\",\"D\"],\"answer\":0,\"explain\":\"解析\",\"needImg\":false,\"imgDesc\":\"\"}]}，answer 为正确选项索引(0-3)。" +
                     anchorTip + historyTip;
@@ -12325,7 +12329,7 @@ var IndoorRouter = (function () {
                         }
                     }
                     if (--need === 0) finish();
-                }, { timeout: 12000 });
+                }, { timeout: 40000 });
             }
             for (var k = 0; k < n; k++) { one(k); kSeq = k + 1; }
         }
