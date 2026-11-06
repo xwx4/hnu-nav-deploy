@@ -7001,19 +7001,21 @@ var IndoorRouter = (function () {
             apiKey: "",
             /* 模型路由：根据任务类型选择最合适的模型（主模型 + 降级备选） */
             modelRouter: {
-                analyze:  ["hy3", "hy4"],                                   /* 学科/题型/难度/知识点分析（最快） */
-                explain:  ["hy3", "deepseek-v4-pro-0813", "hy4"],           /* 讲透原题/知识点（实测 hy3 最稳最快） */
-                generate: ["hy3", "deepseek-v4-pro-0813", "hy4"],           /* 生成推荐题/变式题 */
-                score:    ["hy3", "hy4"],                                   /* 质量评分/权威性判断 */
-                mother:   ["hy3", "deepseek-v4-pro-0813", "hy4"],           /* 母题溯源 */
-                recommend:["hy3", "deepseek-v4-pro-0813", "hy4"],           /* 分层推荐 */
-                pipeline: ["hy3", "deepseek-v4-pro-0813", "hy4"],           /* 一站式讲解+母题+推题 */
-                current:  ["kimi-k3", "hy3", "hy4"],                        /* 时效性问题 */
-                vision:   ["hy4", "hy3"]                                    /* 图片多模态识别 */
+                analyze:  ["deepseek-v4-pro-0813", "hy4"],                    /* 学科/题型/难度/知识点分析 */
+                explain:  ["deepseek-v4-pro-0813", "kimi-k3", "hy4"],         /* 讲透原题/知识点（实测 deepseek 首字 2.5~4s 且不截断） */
+                generate: ["deepseek-v4-pro-0813", "kimi-k3", "hy4"],         /* 生成推荐题/变式题 */
+                score:    ["deepseek-v4-pro-0813", "hy4"],                    /* 质量评分/权威性判断 */
+                mother:   ["deepseek-v4-pro-0813", "kimi-k3", "hy4"],         /* 母题溯源 */
+                recommend:["deepseek-v4-pro-0813", "kimi-k3", "hy4"],         /* 分层推荐 */
+                pipeline: ["deepseek-v4-pro-0813", "kimi-k3", "hy4"],         /* 一站式讲解+母题 */
+                current:  ["kimi-k3", "deepseek-v4-pro-0813", "hy4"],         /* 时效性问题 */
+                vision:   ["hy4", "kimi-k3"],                                /* 图片多模态识别 */
+                /* hy3 / glm-5.3 已下线：实测长 JSON 生成 30s 零输出或截断，保留在 router 外不再默认使用 */
+                fallback: ["deepseek-v4-pro-0813", "kimi-k3", "hy4", "hy3"]
             },
             /* 默认 Provider（兼容旧逻辑） */
             providers: [
-                { id: "default", name: "Tencent-TokenHub", endpoint: "https://tokenhub.tencentmaas.com/v1/chat/completions", apiKey: "", model: "hy3", enabled: true }
+                { id: "default", name: "Tencent-TokenHub", endpoint: "https://tokenhub.tencentmaas.com/v1/chat/completions", apiKey: "", model: "deepseek-v4-pro-0813", enabled: true }
             ],
             /* 评分权重（0-1） */
             scoreWeights: {
@@ -7284,8 +7286,10 @@ var IndoorRouter = (function () {
                 var tasks = (taskTypes || []).filter(Boolean);
                 if (!tasks.length) { self.callStream(messages, "pipeline", onChunk, cb); return; }
                 var list = self.selectModels(tasks[0]) || [];
-                var primaryModel = list[0];
-                var hedgeModel = tasks[1] ? self.selectModels(tasks[1])[0] : null;
+                /* opts.primaryModel / opts.hedgeModel：允许调用方指定模型对，
+                 * 避免两条并发生成任务抢同一个模型互相拖慢 */
+                var primaryModel = (opts && opts.primaryModel) || list[0];
+                var hedgeModel = (opts && opts.hedgeModel) || (tasks[1] ? self.selectModels(tasks[1])[0] : null);
                 /* 对冲模型与主模型重合时，改用主模型的第二备选，保证一定有第二条路 */
                 if (!hedgeModel || hedgeModel === primaryModel) hedgeModel = list[1] || null;
                 if (hedgeModel === primaryModel) hedgeModel = null;
@@ -7308,13 +7312,14 @@ var IndoorRouter = (function () {
                         if (onChunk) onChunk(acc, delta);
                     }, function (err, fullText) {
                         if (done) return;
-                        if (winner === model) {
-                            var text = (fullText && String(fullText).trim()) ? fullText : buf[model];
-                            if (text && String(text).trim()) { finish(null, { provider: provider.name, text: text, model: model }); }
-                            else { finish(new Error("all_models_failed"), null); }
+                        var text = (fullText && String(fullText).trim()) ? fullText : buf[model];
+                        /* 谁先拿到完整有效结果谁收尾：即使它没抢到首字，也优先保证「一定出结果」，
+                         * 避免主模型只吐了半截就卡死、备选明明成功却被 winner 锁死丢弃 */
+                        if (text && String(text).trim()) {
+                            finish(null, { provider: provider.name, text: text, model: model });
                             return;
                         }
-                        if (winner) return;
+                        if (winner === model) winner = null; /* 首字模型空手而归：让仍在跑的备选接手 */
                         failed++;
                         if (failed >= total) finish(new Error("all_models_failed"), null);
                     });
@@ -8219,11 +8224,44 @@ var IndoorRouter = (function () {
                         } catch (e2) { /* 跳过残缺对象 */ }
                     }
                 }
+                /* 上游偶发「内容写完了但没收尾」：字符串已闭合、只缺右括号时补括号救回，
+                 * 截断在字符串中间则坚决丢弃，宁可重试也不给用户半句答案 */
+                var fixed = repairTruncatedJson(s);
+                if (fixed) {
+                    var dup = false;
+                    for (var k = 0; k < arr.length; k++) { if (arr[k] && arr[k].text === fixed.text) { dup = true; break; } }
+                    if (!dup) arr.push(fixed);
+                }
                 return arr;
+            }
+            function repairTruncatedJson(s) {
+                var str = String(s || "");
+                var start = -1, depth = 0, inStr = false, esc = false;
+                for (var i = 0; i < str.length; i++) {
+                    var ch = str.charAt(i);
+                    if (inStr) {
+                        if (esc) { esc = false; continue; }
+                        if (ch === "\\") { esc = true; continue; }
+                        if (ch === "\"") inStr = false;
+                        continue;
+                    }
+                    if (ch === "\"") { inStr = true; continue; }
+                    if (ch === "{") { if (depth === 0) start = i; depth++; }
+                    else if (ch === "}") { depth--; if (depth === 0) start = -1; }
+                }
+                if (inStr || start < 0 || depth <= 0) return null;
+                var frag = str.slice(start).replace(/[\s,]+$/, "");
+                if (/[:,]$/.test(frag)) return null;
+                for (var d = 0; d < depth; d++) frag += "}";
+                try {
+                    var o = JSON.parse(sanitizeJsonBackslashes(frag));
+                    if (o && o.text && o.answer && o.solution) return o;
+                } catch (e) { /* 修复失败，按失败处理 */ }
+                return null;
             }
 
             /* 并行批生成：总耗时≈单次调用；流式边生成边交付，第一道题 2-4s 就能上屏 */
-            function genBatch(tiers, done, task, onPartial) {
+            function genBatch(tiers, done, task, onPartial, prefer) {
                 var need = tiers.map(function (t) { return "「" + t.label + "」：" + t.hint; }).join("\n");
                 var sys = "你是一位" + subName + "命题专家，负责命制分层练习题。" +
                     "\n【本次只出 " + tiers.length + " 道】按下列档位各出 1 道：\n" + need +
@@ -8245,7 +8283,12 @@ var IndoorRouter = (function () {
                     return out;
                 }
                 var acc = "", lastCount = 0;
-                /* pipeline 首选 flash 模型：流式生成，边出边交付 */
+                /* 指定模型对：两条并发生成任务各用各的模型，避免抢同一个模型把首字拖到 20s+ */
+                var hopts = null;
+                if (prefer && prefer.length) {
+                    hopts = { primaryModel: prefer[0], hedgeModel: prefer[1] || null, hedgeDelay: 2500 };
+                }
+                /* pipeline 首选模型：流式生成，边出边交付 */
                 WQ_AI_ROUTER.hedgeStream(msgs, [task || "pipeline", "analyze"], function (streamText) {
                     acc = streamText || acc;
                     if (!onPartial || !acc) return;
@@ -8256,10 +8299,11 @@ var IndoorRouter = (function () {
                     if (part.length) { try { onPartial(part); } catch (e) { /* 忽略渲染异常 */ } }
                 }, function (err, res) {
                     var raw = (res && res.text) || acc;
-                    if (err && !raw) { done([]); return; }
+                    if (err && !raw) { console.info("[GenBatch] tiers=" + tiers.map(function (t) { return t.key; }).join(",") + " got=0 err=" + err.message); done([]); return; }
                     var arr = parseBatch(raw);
+                    console.info("[GenBatch] tiers=" + tiers.map(function (t) { return t.key; }).join(",") + " got=" + arr.length + " chars=" + String(raw || "").length);
                     done(pack(arr, (res && res.provider) || "AI"));
-                });
+                }, hopts);
             }
 
             /* 专门校验 AI：仅后台静默运行，不阻塞首屏；不过关才修缮或定向重生成 */
@@ -8356,7 +8400,7 @@ var IndoorRouter = (function () {
                     retrying = false;
                     aiQs = aiQs.concat(qs2 || []);
                     if (aiQs.length) finishFirst(); else retryAll();
-                }, task);
+                }, task, null, PAIR_POOL[(retryIdx - 1) % PAIR_POOL.length]);
             }
             function rebuildAiQs() {
                 aiQs = [].concat(batchMap.b1 || [], batchMap.b2 || [], extraQs);
@@ -8380,7 +8424,7 @@ var IndoorRouter = (function () {
                     }
                     /* 网关拥塞时按退避重试，直到三档补齐（仍然只走 AI） */
                     if (aiQs.length < 3) setTimeout(function () { topUp(tries + 1); }, Math.min(8000, 1200 * Math.pow(2, tries)));
-                }, "generate");
+                }, "generate", null, PAIR_POOL[tries % PAIR_POOL.length]);
             }
             function onPartialBatch(bid, qs) {
                 batchMap[bid] = qs || [];
@@ -8402,13 +8446,24 @@ var IndoorRouter = (function () {
                 };
             }
 
+            /* 两组生成任务错开模型：b1 用 deepseek，b2 用 kimi，互不抢通道 */
+            var PAIR_B1 = ["deepseek-v4-pro-0813", "hy4"];
+            var PAIR_B2 = ["kimi-k3", "hy4"];
+            /* 补题时按轮次轮换模型对，任何一次网关抖动都不会卡死在同一模型上 */
+            var PAIR_POOL = [
+                ["deepseek-v4-pro-0813", "kimi-k3"],
+                ["kimi-k3", "hy4"],
+                ["hy4", "deepseek-v4-pro-0813"],
+                ["deepseek-v4-pro-0813", "hy4"],
+                ["kimi-k3", "deepseek-v4-pro-0813"]
+            ];
             /* 错峰起跑：两批不要同时抢通道，避免首字互相拖慢 */
             setTimeout(function () {
-                genBatch([WQ_REC_TIERS[0], WQ_REC_TIERS[1]], onBatch("b1"), "pipeline", function (part) { onPartialBatch("b1", part); });
+                genBatch([WQ_REC_TIERS[0], WQ_REC_TIERS[1]], onBatch("b1"), "pipeline", function (part) { onPartialBatch("b1", part); }, PAIR_B1);
             }, 300);
             setTimeout(function () {
-                genBatch([WQ_REC_TIERS[2]], onBatch("b2"), "pipeline", function (part) { onPartialBatch("b2", part); });
-            }, 900);
+                genBatch([WQ_REC_TIERS[2]], onBatch("b2"), "pipeline", function (part) { onPartialBatch("b2", part); }, PAIR_B2);
+            }, 600);
         }
 
         /* 合并本轮 AI 题目并去重，固定取 3 道（题库题不得混入） */
