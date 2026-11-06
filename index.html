@@ -8501,21 +8501,24 @@ var IndoorRouter = (function () {
         /* 合并本轮 AI 题目并去重，固定取 3 道（题库题不得混入） */
         function mergeWQRecs(aiList, localList, origText, target) {
             var out = [], seen = [];
+            function nkey(s) {
+                return String(s || "").replace(/[\s，,。.；;：:！!？?、"'"'（）()\[\]【】]/g, "");
+            }
+            var origKey = nkey(origText);
             function push(q) {
                 if (!q || !q.text) return;
-                /* AI 新出的变式题本来就会和原题共用同一函数/情境，
-                 * 用 0.6 的严格阈值会把整档题误杀；只剔除几乎逐字重复的情况 */
-                var origSim = textSim(origText || "", q.text);
-                if (q._aiGenerated ? origSim > 0.9 : origSim > 0.6) return;
+                var nk = nkey(q.text);
+                if (!nk) return;
+                /* 只剔除「与原题逐字相同」的情况：AI 变式题必然共用同一函数/情境，
+                 * 字符集相似度对中文数学题几乎恒为 0.9+，用它判断会把整档题误杀 */
+                if (origKey && nk === origKey) return;
                 /* 同一档位只保留最先到达的一道：补题与主批次可能同时产出同一档，
                  * 不去重就会出现两道「变式迁移」并把另一档挤掉 */
                 if (q._tierKey) {
                     for (var t = 0; t < out.length; t++) { if (out[t] && out[t]._tierKey === q._tierKey) return; }
                 }
-                for (var i = 0; i < seen.length; i++) {
-                    if (textSim(q.text, seen[i]) > 0.85) return;
-                }
-                seen.push(q.text);
+                if (seen.indexOf(nk) >= 0) return;   /* 题干逐字重复才算重复 */
+                seen.push(nk);
                 out.push(q);
             }
             (aiList || []).forEach(push);
@@ -10860,20 +10863,16 @@ var IndoorRouter = (function () {
                 if (recsArr && recsArr.length) _wqLastRecs = recsArr;
                 try { console.info("[Rec] paint=" + ((recsArr && recsArr.length) || 0) + " layers=" + (recsArr || []).map(function (q) { return q._layer || "?"; }).join("|")); } catch (e) {}
                 /* 系统级难度校验：推荐题难度统一压到「原题难度+1」，既不允许低于也不允许高于，
-                   避免 L7 原题推出 L9 的错位；同时按题干相似度去重，避免出现两道一模一样的题 */
+                   避免 L7 原题推出 L9 的错位；去重只认题干逐字相同，避免误杀同情境的不同档位题 */
                 var minRecDiff = Math.min(10, (origDiff || 1) + 1);
                 var seenTexts = [];
                 var cleanRecs = [];
                 for (var ri = 0; ri < recsArr.length; ri++) {
                     var rq0 = recsArr[ri];
                     if (!rq0 || !rq0.text) continue;
-                    var tNorm = String(rq0.text).replace(/[ \t\r\n]+/g, "").trim();
-                    var dup = false;
-                    for (var si = 0; si < seenTexts.length; si++) {
-                        if (tNorm === seenTexts[si] || textSim(rq0.text, seenTexts[si]) > 0.85) { dup = true; break; }
-                    }
-                    if (dup) continue;
-                    seenTexts.push(rq0.text);
+                    var tNorm = String(rq0.text).replace(/[\s，,。.；;：:！!？?、"'"'（）()\[\]【】]/g, "");
+                    if (seenTexts.indexOf(tNorm) >= 0) continue;
+                    seenTexts.push(tNorm);
                     rq0.diff = minRecDiff;
                     /* 质量评分：用于"择优取3"——答案+解析越完整、层级越明确、与原题差异越大，分越高 */
                     var qScore = 0;
