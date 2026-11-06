@@ -7032,8 +7032,8 @@ var IndoorRouter = (function () {
             qualityWeights: { ai: 0.4, answer: 0.3, source: 0.2, dedup: 0.1 },
             /* 超时（ms）—— 15s 未响应即降级，保证秒级体感 */
             timeout: 15000,
-            /* 流式首字看门狗：12s 还没吐出第一个字就判定该模型卡死，立刻换下一个 */
-            streamFirstTokenTimeout: 12000,
+            /* 流式首字看门狗：20s 还没吐出第一个字就判定该模型卡死，立刻换下一个 */
+            streamFirstTokenTimeout: 20000,
             /* 流式空闲看门狗：出字之后每段间隔超过 60s 才放弃 */
             streamIdleTimeout: 60000
         };
@@ -7283,8 +7283,11 @@ var IndoorRouter = (function () {
                 var provider = providers[0];
                 var tasks = (taskTypes || []).filter(Boolean);
                 if (!tasks.length) { self.callStream(messages, "pipeline", onChunk, cb); return; }
-                var primaryModel = self.selectModels(tasks[0])[0];
+                var list = self.selectModels(tasks[0]) || [];
+                var primaryModel = list[0];
                 var hedgeModel = tasks[1] ? self.selectModels(tasks[1])[0] : null;
+                /* 对冲模型与主模型重合时，改用主模型的第二备选，保证一定有第二条路 */
+                if (!hedgeModel || hedgeModel === primaryModel) hedgeModel = list[1] || null;
                 if (hedgeModel === primaryModel) hedgeModel = null;
                 var hedgeDelay = (opts && opts.hedgeDelay) || 2500;
                 var winner = null, done = false, started = {}, buf = {}, failed = 0;
