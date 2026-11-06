@@ -7318,33 +7318,37 @@ var IndoorRouter = (function () {
                     stream: true,
                     reasoning_effort: "none"
                 };
-                var timedOut = false, finished = false, fullAcc = "", timer = null;
-                /* 回调只允许一次：避免"超时"与"晚到成功"双回调，导致讲解内容来回切换 */
+                var finished = false, fullAcc = "", timer = null, fellBack = false;
                 function finish(err, text) {
                     if (finished) return;
                     finished = true;
                     if (timer) { clearTimeout(timer); timer = null; }
                     cb(err, text);
                 }
-                /* 空闲超时：每收到一段内容就重置，长讲解不会被固定短超时一刀切 */
-                function armTimer() {
+                /* 空闲超时：每收到一段内容就重置；已有内容则平滑收尾，绝不换模型重来 */
+                function armTimer(ms) {
                     if (timer) clearTimeout(timer);
                     timer = setTimeout(function () {
-                        if (fullAcc) { finish(null, fullAcc); return; }  /* 已有内容：平滑收尾，不换模型重来 */
-                        timedOut = true;
+                        if (fullAcc) { finish(null, fullAcc); return; }
                         finish(new Error("timeout"), null);
-                    }, WQ_AI_CONFIG.streamIdleTimeout || 60000);
+                    }, ms || (WQ_AI_CONFIG.streamIdleTimeout || 60000));
                 }
-                armTimer();
-
-                fetch(url, {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify(payload)
-                }).then(function (r) {
-                    if (finished) return;
-                    if (!r.ok) throw new Error("HTTP " + r.status);
-                    /* 如果响应不是 SSE，直接当 JSON 处理（某些上游不支持 stream） */
+                function parseChunk(text) {
+                    var lines = String(text).split("\n");
+                    for (var i = 0; i < lines.length; i++) {
+                        var line = lines[i].trim();
+                        if (!line || line.indexOf("data:") !== 0) continue;
+                        var data = line.slice(5).trim();
+                        if (!data || data === "[DONE]") continue;
+                        try {
+                            var obj = JSON.parse(data);
+                            var ch = obj.choices && obj.choices[0];
+                            var delta = (ch && ch.delta && ch.delta.content) || (ch && ch.message && ch.message.content) || obj.response || "";
+                            if (delta) { fullAcc += delta; armTimer(); if (onChunk) onChunk(fullAcc, delta); }
+                        } catch (e) { /* 跳过异常 chunk */ }
+                    }
+                }
+                function readStream(r) {
                     var ct = r.headers.get("content-type") || "";
                     if (ct.indexOf("text/event-stream") < 0) {
                         return r.json().then(function (data) {
@@ -7354,67 +7358,59 @@ var IndoorRouter = (function () {
                             finish(null, text);
                         });
                     }
-                    var reader = r.body.getReader();
-                    var decoder = new TextDecoder();
-                    var buffer = "";
-                    function read() {
+                    var reader = r.body.getReader(), decoder = new TextDecoder(), buffer = "";
+                    function pump() {
                         if (finished) return;
                         reader.read().then(function (result) {
                             if (finished) return;
                             if (result.done) {
-                                /* 收尾：最后一行可能没有换行符，先按 SSE 解析残留 buffer，避免整段内容丢失 */
-                                var tail = (buffer || "").trim();
-                                if (tail && tail.indexOf("data:") === 0) {
-                                    try {
-                                        var tobj = JSON.parse(tail.slice(5).trim());
-                                        var tch = tobj.choices && tobj.choices[0];
-                                        var tdelta = (tch && tch.delta && tch.delta.content) || (tch && tch.message && tch.message.content) || "";
-                                        if (tdelta) {
-                                            fullAcc += tdelta;
-                                            if (onChunk) onChunk(fullAcc, tdelta);
-                                        }
-                                    } catch (e) { /* 忽略 */ }
-                                }
-                                /* 流结束但没解析到内容：尝试把 buffer 当 JSON 解析（上游可能没发 data: 前缀） */
-                                if (!fullAcc && buffer.trim()) {
-                                    try {
-                                        var obj = JSON.parse(buffer.trim());
-                                        var c = obj.choices && obj.choices[0] && obj.choices[0].message && obj.choices[0].message.content;
-                                        if (c) { fullAcc = c; if (onChunk) onChunk(c, c); }
-                                    } catch (e) {}
-                                }
+                                if (buffer.trim()) parseChunk(buffer);
+                                if (!fullAcc && !fellBack) { tryCfFallback(); return; }
                                 finish(null, fullAcc);
                                 return;
                             }
                             buffer += decoder.decode(result.value, { stream: true });
                             var lines = buffer.split("\n");
                             buffer = lines.pop();
-                            for (var i = 0; i < lines.length; i++) {
-                                var line = lines[i].trim();
-                                if (!line || line.indexOf("data:") !== 0) continue;
-                                var data = line.slice(5).trim();
-                                if (data === "[DONE]" || !data) continue;
-                                try {
-                                    var obj = JSON.parse(data);
-                                    var delta = obj.choices && obj.choices[0] && obj.choices[0].delta && obj.choices[0].delta.content;
-                                    if (delta) {
-                                        fullAcc += delta;
-                                        armTimer();
-                                        if (onChunk) onChunk(fullAcc, delta);
-                                    }
-                                } catch (e) { /* 忽略解析异常的 chunk */ }
-                            }
-                            read();
+                            parseChunk(lines.join("\n"));
+                            pump();
                         }).catch(function (e) {
                             if (finished) return;
-                            /* 已流出内容：保留现有内容收尾，绝不重来 */
+                            if (!fullAcc && !fellBack) { tryCfFallback(); return; }
                             finish(fullAcc ? null : e, fullAcc || null);
                         });
                     }
-                    read();
-                }).catch(function (e) {
+                    pump();
+                }
+                /* 主通道没内容（402/超时/空响应）→ 立即切 Cloudflare Workers AI 流式兜底 */
+                function tryCfFallback() {
                     if (finished) return;
-                    finish(e, null);
+                    if (fellBack) { finish(new Error("all_failed"), null); return; }
+                    fellBack = true;
+                    armTimer(60000);
+                    fetch("/api/chat-cf", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ model: model, messages: messages, stream: true })
+                    }).then(function (r) {
+                        if (finished) return;
+                        if (!r.ok) throw new Error("CF HTTP " + r.status);
+                        readStream(r);
+                    }).catch(function () {
+                        if (!finished) finish(new Error("all_failed"), null);
+                    });
+                }
+                armTimer();
+                fetch(url, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify(payload)
+                }).then(function (r) {
+                    if (finished) return;
+                    if (!r.ok) throw new Error("HTTP " + r.status);
+                    readStream(r);
+                }).catch(function () {
+                    if (!finished) tryCfFallback();
                 });
             },
 
