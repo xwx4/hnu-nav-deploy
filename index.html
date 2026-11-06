@@ -8,7 +8,7 @@
     <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#0f172a">
     <title>立体导航（单文件版）</title>
     <!-- KaTeX 数学公式渲染：多 CDN 依次兜底，避免单一 CDN 在移动网络下失败导致 $...$ 原样显示 -->
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css" onerror="this.onerror=null;this.href='https://unpkg.com/katex@0.16.11/dist/katex.min.css'">
     <script>
       (function () {
         var urls = [
@@ -7959,129 +7959,214 @@ var IndoorRouter = (function () {
         ];
 
         function aiRecommendQuestions(text, subject, kps, origDiff, cb) {
-            if (!WQ_AI_CONFIG.enabled) { cb(new Error("ai_disabled"), []); return; }
             if (typeof cb !== "function") return;
             var target = Math.min(10, (origDiff || 5) + 1);
             var kpList = (kps && kps.length) ? kps.join("、") : "（依据原题判断）";
             var subName = subject || "全科";
-            var accepted = {};
-            var everGenerated = [];
-            var round = 0, MAX_ROUND = 3;
+            /* 本地秒级兜底：同知识点题库题，保证网络慢时也有内容可看 */
+            var localRecs = wqLocalRecs(subject, kps, origDiff, text);
 
-            function missing() {
-                return WQ_REC_TIERS.filter(function (t) { return !accepted[t.key]; });
+            if (!WQ_AI_CONFIG.enabled) {
+                cb(localRecs.length ? null : new Error("ai_disabled"), localRecs);
+                return;
             }
-            function finish() {
-                var out = [], seen = [];
-                for (var i = 0; i < WQ_REC_TIERS.length; i++) {
-                    var q = accepted[WQ_REC_TIERS[i].key];
-                    if (q) { out.push(q); seen.push(q.text); }
-                }
-                if (out.length < 3) {
-                    for (var j = 0; j < everGenerated.length && out.length < 3; j++) {
-                        var g = everGenerated[j];
-                        var dup = false;
-                        for (var k = 0; k < seen.length; k++) {
-                            if (textSim(g.text, seen[k]) > 0.85) { dup = true; break; }
-                        }
-                        if (dup) continue;
-                        seen.push(g.text);
-                        out.push(g);
+
+            var aiQs = [], delivered = false;
+            /* 12 秒红线：AI 仍未出结果则先用本地题库兜底，绝不长时间空白 */
+            var guard = setTimeout(function () {
+                if (delivered) return;
+                delivered = true;
+                cb(null, mergeWQRecs(aiQs, localRecs, text, target));
+            }, 12000);
+
+            function normalize(obj, tier, provider) {
+                if (!obj || !obj.text) return null;
+                var label = tier && tier.label ? tier.label : (obj.layer || obj._layer || "拓展探究");
+                return {
+                    text: fixLatex(String(obj.text || "")).replace(/\r\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim(),
+                    answer: fixLatex(String(obj.answer || "")),
+                    idea: fixLatex(String(obj.idea || "")),
+                    solution: fixLatex(String(obj.solution || "")),
+                    pitfall: "", method: "",
+                    diff: target, kp: kps || [], ability: [],
+                    source: "系统-" + (provider || "AI"), verify_status: "passed",
+                    _aiGenerated: true, _layer: label, _tierKey: (tier && tier.key) || obj._tierKey || ""
+                };
+            }
+
+            /* 容错解析：优先完整数组；输出被截断时逐个抠出完整对象，尽量多救回几道 */
+            function parseBatch(raw) {
+                var arr = [];
+                try { arr = extractJsonArray(raw) || []; } catch (e) { arr = []; }
+                if (!arr.length) {
+                    var re = /\{[\s\S]*?\}/g, mm;
+                    while ((mm = re.exec(String(raw || ""))) !== null) {
+                        try {
+                            var o = JSON.parse(sanitizeJsonBackslashes(mm[0]));
+                            if (o && o.text) arr.push(o);
+                        } catch (e2) { /* 跳过残缺对象 */ }
                     }
                 }
-                cb(null, out.slice(0, 3));
+                return arr;
             }
 
-            /* 单档生成：答案与解析必须写透 */
-            function genTier(tier, done) {
-                var sys = "你是一位" + subName + "命题专家。请只生成 1 道「" + tier.label + "」题用于分层训练。" +
-                    "\n【题源原则】必须扎根原题的母知识点：" + kpList + "。" + tier.hint + "。先回到最本质的知识点，再向外延伸；严禁出与原题无关的题。" +
-                    "\n【难度铁律】本题难度必须严格为 L" + target + "（原题 L" + (origDiff || 5) + "，难度 +1）。不得只改数字、拆小问或截取原题片段；必须实质提升思维深度或步骤复杂度。" +
-                    "\n【答案写透铁律·重要】必须输出完整可读的解答：写清每一步推导依据、关键变形与最终结论；答案写实写细，不因篇幅省略步骤，不设字数上限。禁止「略」「同上」「由此可见」等敷衍表述。" +
-                    "\n【措辞纪律】严禁「不对」「错了」「改为」「更正」「正解是」等自我纠错痕迹；不要提及资料、上传、图片等信息来源。直接给最终正确解法。" +
-                    "\n【排版】代码必须用 ```语言 围栏并保留缩进，代码内不要用 $...$；公式用 $...$。只返回 JSON 对象，不要多余文字：" +
-                    "{\"text\":\"题干\",\"answer\":\"最终答案\",\"idea\":\"解题思路\",\"solution\":\"完整详细解答\",\"layer\":\"" + tier.label + "\"}";
-                var user = "学科：" + subName + "\n母知识点：" + kpList + "\n原题：" + text + "\n请生成 1 道难度 L" + target + " 的「" + tier.label + "」题。";
-                WQ_AI_ROUTER.call([{ role: "system", content: sys }, { role: "user", content: user }], "generate", function (err, res) {
-                    if (err || !res || !res.text) { done(null); return; }
-                    var obj = null;
-                    try {
-                        var mm = res.text.match(/\{[\s\S]*\}/);
-                        if (mm) obj = JSON.parse(sanitizeJsonBackslashes(mm[0]));
-                        if (!obj) { var arr = extractJsonArray(res.text); if (arr && arr.length) obj = arr[0]; }
-                    } catch (e) { obj = null; }
-                    if (!obj || !obj.text) { done(null); return; }
-                    var q = {
-                        text: fixLatex(obj.text), answer: fixLatex(obj.answer || ""), idea: fixLatex(obj.idea || ""),
-                        solution: fixLatex(obj.solution || ""), pitfall: "", method: "",
-                        diff: target, kp: kps || [], ability: [],
-                        source: "系统-" + res.provider, verify_status: "passed",
-                        _aiGenerated: true, _layer: tier.label, _tierKey: tier.key
-                    };
-                    everGenerated.push(q);
-                    done(q);
+            /* 并行批生成：总耗时≈单次调用，避免逐档串行拖慢 */
+            function genBatch(tiers, done) {
+                var need = tiers.map(function (t) { return "「" + t.label + "」：" + t.hint; }).join("\n");
+                var sys = "你是一位" + subName + "命题专家，负责命制分层练习题。" +
+                    "\n【本次只出 " + tiers.length + " 道】按下列档位各出 1 道：\n" + need +
+                    "\n【题源原则】必须扎根原题的母知识点：" + kpList + "。先回到最本质的知识点，再向外延伸；严禁出与原题无关的题。" +
+                    "\n【难度铁律】每题难度严格为 L" + target + "（原题 L" + (origDiff || 5) + "，难度 +1）。不得只改数字、拆小问或截取原题片段；必须实质提升思维深度或步骤复杂度。" +
+                    "\n【答案写透铁律·重要】每题必须给完整可读解答：写清每一步推导依据、关键变形与最终结论；不因篇幅省略步骤，不设字数上限。禁止「略」「同上」「由此可见」等敷衍表述。" +
+                    "\n【措辞纪律】严禁「不对」「错了」「改为」「更正」「正解是」等自我纠错痕迹；不要提及资料、上传、图片等信息来源。" +
+                    "\n【排版】公式一律用 $...$ 包裹，反斜杠命令必须完整（如 \\frac、\\sqrt、\\right）；代码用 ``` 围栏。" +
+                    "\n只返回 JSON 数组，不要任何解释文字：[{\"text\":\"题干\",\"answer\":\"最终答案\",\"idea\":\"思路\",\"solution\":\"完整详细解答\",\"layer\":\"档位名\"}]";
+                var user = "学科：" + subName + "\n母知识点：" + kpList + "\n原题：" + text + "\n目标难度：L" + target +
+                    "\n请按顺序生成 " + tiers.length + " 道题：" + tiers.map(function (t) { return t.label; }).join("、") + "。";
+                /* pipeline 路由首选 flash 模型：生成快，避免 kimi 长尾拖慢秒级体验 */
+                WQ_AI_ROUTER.call([{ role: "system", content: sys }, { role: "user", content: user }], "pipeline", function (err, res) {
+                    if (err || !res || !res.text) { done([]); return; }
+                    var arr = parseBatch(res.text);
+                    var out = [];
+                    for (var i = 0; i < arr.length && i < tiers.length; i++) {
+                        var q = normalize(arr[i], tiers[i], res.provider);
+                        if (q) out.push(q);
+                    }
+                    done(out);
                 });
             }
 
-            /* 专门校验 AI：难度/正确性/解析完整度/去重；不过关直接给修缮稿 */
-            function verifyBatch(batch, done) {
+            /* 专门校验 AI：仅后台静默运行，不阻塞首屏；不过关才修缮或定向重生成 */
+            function verifyAndRepair(batch, done) {
+                if (!batch.length) { done(null); return; }
                 var list = batch.map(function (q, i) {
                     return "【第" + (i + 1) + "题｜" + q._layer + "】\n题干：" + q.text + "\n答案：" + q.answer + "\n解答：" + q.solution;
                 }).join("\n\n");
                 var sys = "你是资深的" + subName + "教研审题专家，负责审核分层练习题。请逐题严格审核四项：" +
-                    "①难度是否严格等于 L" + target + "（高于则下调、低于则上调，题目质量必须保持）；" +
-                    "②答案是否正确无误；③解答是否完整写透（步骤齐全、可直接阅读，缺失必须补齐）；④是否与原题雷同或与同批其他题重复。" +
+                    "①难度是否严格等于 L" + target + "；②答案是否正确无误；③解答是否完整写透；④是否与原题雷同或与同批其他题重复。" +
                     "\n不通过的题必须直接给出修缮后的完整题目（题干/答案/解答全部重写到位），而不是只说明问题。" +
-                    "\n只返回 JSON 数组，不要多余文字：[{\"idx\":1,\"ok\":true},{\"idx\":2,\"ok\":false,\"text\":\"修缮后题干\",\"answer\":\"修缮后答案\",\"solution\":\"修缮后完整解答\"}]";
+                    "\n只返回 JSON 数组：[{\"idx\":1,\"ok\":true},{\"idx\":2,\"ok\":false,\"text\":\"修缮后题干\",\"answer\":\"修缮后答案\",\"solution\":\"修缮后完整解答\"}]";
                 var user = "原题：" + text + "\n原题难度：L" + (origDiff || 5) + "\n目标难度：L" + target + "\n\n待审题目：\n" + list;
-                WQ_AI_ROUTER.call([{ role: "system", content: sys }, { role: "user", content: user }], "generate", function (err, res) {
+                WQ_AI_ROUTER.call([{ role: "system", content: sys }, { role: "user", content: user }], "analyze", function (err, res) {
                     if (err || !res || !res.text) { done(null); return; }
-                    var verdict = extractJsonArray(res.text);
-                    done(verdict && verdict.length ? verdict : null);
-                });
-            }
-
-            function step() {
-                var lack = missing();
-                if (!lack.length) return finish();
-                if (round >= MAX_ROUND) return finish();
-                round++;
-                var got = [], left = lack.length;
-                lack.forEach(function (tier) {
-                    genTier(tier, function (q) {
-                        if (q) got.push(q);
-                        if (--left === 0) afterGen(got);
+                    var verdict = [];
+                    try { verdict = extractJsonArray(res.text) || []; } catch (e) { verdict = []; }
+                    var out = [], changed = false, regen = [];
+                    for (var i = 0; i < batch.length; i++) {
+                        var q = batch[i], v = verdict[i];
+                        if (v && v.ok === false) {
+                            changed = true;
+                            if (v.text) {
+                                var rq = normalize(v, { key: q._tierKey, label: q._layer }, "校验");
+                                if (rq) { out.push(rq); continue; }
+                            }
+                            regen.push({ q: q, idx: i });
+                            continue;
+                        }
+                        out.push(q);
+                    }
+                    if (!regen.length) { done(changed ? out : null); return; }
+                    var tiers = regen.map(function (r) {
+                        var t = WQ_REC_TIERS.filter(function (x) { return x.key === r.q._tierKey; })[0];
+                        return t || { key: r.q._tierKey, label: r.q._layer, hint: "同知识点、难度 +1 的完整新题" };
+                    });
+                    genBatch(tiers, function (nq) {
+                        for (var j = 0; j < regen.length; j++) {
+                            var pick = nq[j] || nq[0];
+                            if (pick) out[regen[j].idx] = pick;
+                        }
+                        done(out); /* 保留空位，便于按索引回填 */
                     });
                 });
             }
 
-            function afterGen(got) {
-                if (!got.length) return finish();
-                verifyBatch(got, function (verdict) {
-                    for (var i = 0; i < got.length; i++) {
-                        var q = got[i];
-                        var v = verdict ? verdict[i] : null;
-                        if (v && v.ok === false) {
-                            /* 校验 AI 给出修缮稿：进兜底池，本轮该档仍缺，下轮重生成 */
-                            if (v.text) {
-                                everGenerated.push({
-                                    text: fixLatex(v.text), answer: fixLatex(v.answer || q.answer), idea: fixLatex(v.idea || q.idea),
-                                    solution: fixLatex(v.solution || q.solution), pitfall: "", method: "",
-                                    diff: target, kp: kps || [], ability: [], source: q.source,
-                                    verify_status: "passed", _aiGenerated: true, _layer: q._layer, _tierKey: q._tierKey
-                                });
-                            }
-                            continue;
-                        }
-                        q.diff = target;
-                        if (!q.answer) q.answer = "（详见解答）";
-                        if (!accepted[q._tierKey]) accepted[q._tierKey] = q;
-                    }
-                    if (missing().length) step(); else finish();
+            var pending = 2, retried = false;
+            function finishFirst() {
+                if (delivered) return;
+                delivered = true;
+                clearTimeout(guard);
+                /* 首轮结果立即交付：三道齐全即展示，不足用同知识点题库题补齐 */
+                cb(null, mergeWQRecs(aiQs, localRecs, text, target));
+                /* 后台校验：发现不合格题目时静默替换，不打断阅读 */
+                verifyAndRepair(aiQs.slice(0, 3), function (fixed) {
+                    if (!fixed || !fixed.length) return;
+                    cb(null, mergeWQRecs(aiQs.map(function (q, i) { return fixed[i] || q; }), localRecs, text, target));
                 });
             }
+            function onBatch(qs) {
+                aiQs = aiQs.concat(qs || []);
+                if (--pending > 0) return;
+                /* 两批全空：换强模型再兜底重试一次，避免「极易失败」 */
+                if (!aiQs.length && !retried) {
+                    retried = true;
+                    pending = 1;
+                    genBatch([WQ_REC_TIERS[0], WQ_REC_TIERS[1], WQ_REC_TIERS[2]], function (qs2) {
+                        aiQs = aiQs.concat(qs2 || []);
+                        finishFirst();
+                    });
+                    return;
+                }
+                finishFirst();
+            }
 
-            step();
+            genBatch([WQ_REC_TIERS[0], WQ_REC_TIERS[1]], onBatch);
+            genBatch([WQ_REC_TIERS[2]], onBatch);
+        }
+
+        /* 合并 AI 推荐题与本地题库兜底题，去重后固定取 3 道 */
+        function mergeWQRecs(aiList, localList, origText, target) {
+            var out = [], seen = [];
+            function push(q) {
+                if (!q || !q.text) return;
+                if (textSim(origText || "", q.text) > 0.6) return;
+                for (var i = 0; i < seen.length; i++) {
+                    if (textSim(q.text, seen[i]) > 0.85) return;
+                }
+                seen.push(q.text);
+                out.push(q);
+            }
+            (aiList || []).forEach(push);
+            (localList || []).forEach(push);
+            out = out.slice(0, 3);
+            for (var i = 0; i < out.length; i++) out[i].diff = target;
+            return out;
+        }
+
+        /* 本地题库兜底：从现有题库中按知识点重合度挑选同难度层次题目（秒级可用） */
+        function wqLocalRecs(subject, kps, origDiff, origText) {
+            var target = Math.min(10, (origDiff || 5) + 1);
+            var out = [], seen = [];
+            try {
+                var all = (typeof WQ_PIPELINE_B !== "undefined" && WQ_PIPELINE_B.getAllQuestions) ? (WQ_PIPELINE_B.getAllQuestions() || []) : [];
+                var kpList = kps || [];
+                var pool = [];
+                for (var i = 0; i < all.length; i++) {
+                    var q = all[i];
+                    if (!q || !q.text || !q.answer) continue;
+                    if (q.subject && subject && q.subject !== subject) continue;
+                    var kpA = wqKpArr(q), overlap = 0;
+                    for (var k = 0; k < kpA.length; k++) if (kpList.indexOf(kpA[k]) >= 0) overlap++;
+                    if (kpList.length && !overlap) continue;
+                    pool.push({ q: q, score: overlap * 10 - Math.abs((q.diff || 5) - target) });
+                }
+                pool.sort(function (a, b) { return b.score - a.score; });
+                for (var m = 0; m < pool.length && out.length < 3; m++) {
+                    var src = pool[m].q;
+                    if (textSim(origText || "", src.text) > 0.6) continue;
+                    var dup = false;
+                    for (var n = 0; n < seen.length; n++) if (textSim(src.text, seen[n]) > 0.85) { dup = true; break; }
+                    if (dup) continue;
+                    seen.push(src.text);
+                    out.push({
+                        text: src.text, answer: src.answer || "", idea: src.idea || "", solution: src.solution || "",
+                        pitfall: src.pitfall || "", method: src.method || "", diff: target,
+                        kp: wqKpArr(src), ability: [], source: src.source || "题库",
+                        verify_status: "passed", _aiGenerated: false,
+                        _layer: (WQ_REC_TIERS[out.length] || WQ_REC_TIERS[0]).label
+                    });
+                }
+            } catch (e) { /* 题库不可用时静默 */ }
+            return out;
         }
 
         /* ================================================================
@@ -8810,11 +8895,28 @@ var IndoorRouter = (function () {
          * 提升为全局函数：供 aiFullPipeline 内部解析与 renderRichText 渲染共用。 */
         function fixLatex(s) {
             if (typeof s !== "string") return s;
-            s = s.replace(/\\r\\n/g, "\n").replace(/\\n/g, "\n").replace(/\\r/g, "\n").replace(/\\t/g, "\t").replace(/\\f/g, "\f").replace(/\\b/g, "\x08");
-            s = s.replace(/\x08([a-zA-Z])/g, "\\b$1");
+            /* 只修复「被 JSON 解析吃掉的 LaTeX 首字母」，绝不能把 \right 变成 \night：
+             * 原实现把 \r 统一替换成换行再用 \n 补回，导致 \right → \night、\neq 丢失。
+             * 这里按原控制字符逐个还原成正确的命令首字母。 */
+            s = s.replace(/\r([a-zA-Z])/g, "\\r$1");
             s = s.replace(/\f([a-zA-Z])/g, "\\f$1");
             s = s.replace(/\t([a-zA-Z])/g, "\\t$1");
-            s = s.replace(/\n(rho|ight|angle|rightarrow|Rightarrow|ule|oman|ef|lceil|rceil|lfloor|rfloor|efref|efbox|efresh|ot|otag|oindent|ull|umber|abla|u|ewcommand|ewline|ormalsize|opagestyle|ocite|ewpage)/g, "\\n$1");
+            s = s.replace(/\x08([a-zA-Z])/g, "\\b$1");
+            /* 换行符可能来自 \neq / \nu / \nabla 等命令的首字母，也可能是真实换行：
+             * 仅当后续字母构成合法 LaTeX 命令时才补回反斜杠。 */
+            var NCMDS = {
+                eq: 1, e: 1, u: 1, i: 1, abla: 1, ot: 1, otin: 1, ewline: 1, oindent: 1, leq: 1, geq: 1,
+                leqslant: 1, geqslant: 1, mid: 1, parallel: 1, subseteq: 1, rightarrow: 1, Rightarrow: 1,
+                leftarrow: 1, leftrightarrow: 1, in: 1, olm: 1, less: 1, cong: 1, exists: 1, shortmid: 1
+            };
+            s = s.replace(/\n([a-zA-Z]{1,12})/g, function (m, w) {
+                return NCMDS[w] ? "\\n" + w : m;
+            });
+            /* 兼容旧版本已经产生的乱码 */
+            s = s.replace(/\\night\b/g, "\\right");
+            s = s.replace(/\\rac\b/g, "\\frac");
+            s = s.replace(/\\heta\b/g, "\\theta");
+            s = s.replace(/\\imes\b/g, "\\times");
             return s;
         }
 
@@ -8971,32 +9073,56 @@ var IndoorRouter = (function () {
          * 避免出现 "$\mathbb R$"、"$\le$" 这类原样字符严重影响阅读。 */
         function latexToPlain(s) {
             var t = String(s || "");
+            /* 结构命令先处理：\left \right 只是括号定界，直接去掉 */
+            t = t.replace(/\\(left|right)\s*/g, "");
+            t = t.replace(/\\dfrac/g, "\\frac");
             var map = {
                 "\\mathbb{R}": "ℝ", "\\mathbb{N}": "ℕ", "\\mathbb{Z}": "ℤ", "\\mathbb{Q}": "ℚ", "\\mathbb{C}": "ℂ",
-                "\\le": "≤", "\\leq": "≤", "\\ge": "≥", "\\geq": "≥", "\\neq": "≠", "\\ne": "≠",
-                "\\times": "×", "\\div": "÷", "\\pm": "±", "\\cdot": "·", "\\infty": "∞",
-                "\\in": "∈", "\\notin": "∉", "\\subset": "⊂", "\\subseteq": "⊆", "\\cup": "∪", "\\cap": "∩",
-                "\\forall": "∀", "\\exists": "∃", "\\rightarrow": "→", "\\to": "→", "\\Rightarrow": "⇒", "\\leftrightarrow": "↔",
+                "\\le": "≤", "\\leq": "≤", "\\geqslant": "≥", "\\leqslant": "≤", "\\ge": "≥", "\\geq": "≥",
+                "\\neq": "≠", "\\ne": "≠", "\\approx": "≈", "\\equiv": "≡", "\\sim": "∼",
+                "\\times": "×", "\\div": "÷", "\\pm": "±", "\\mp": "∓", "\\cdot": "·", "\\cdots": "⋯", "\\ldots": "…", "\\dots": "…",
+                "\\infty": "∞", "\\partial": "∂", "\\nabla": "∇", "\\degree": "°",
+                "\\in": "∈", "\\notin": "∉", "\\subset": "⊂", "\\subseteq": "⊆", "\\supset": "⊃", "\\supseteq": "⊇",
+                "\\cup": "∪", "\\cap": "∩", "\\emptyset": "∅", "\\varnothing": "∅",
+                "\\forall": "∀", "\\exists": "∃", "\\neg": "¬", "\\land": "∧", "\\lor": "∨",
+                "\\rightarrow": "→", "\\to": "→", "\\Rightarrow": "⇒", "\\leftarrow": "←", "\\Leftarrow": "⇐",
+                "\\leftrightarrow": "↔", "\\Leftrightarrow": "⇔", "\\mapsto": "↦",
                 "\\alpha": "α", "\\beta": "β", "\\gamma": "γ", "\\delta": "δ", "\\epsilon": "ε", "\\varepsilon": "ε",
-                "\\eta": "η", "\\theta": "θ", "\\lambda": "λ", "\\mu": "μ", "\\pi": "π", "\\rho": "ρ",
-                "\\sigma": "σ", "\\tau": "τ", "\\phi": "φ", "\\varphi": "φ", "\\omega": "ω", "\\xi": "ξ", "\\zeta": "ζ",
-                "\\sum": "∑", "\\prod": "∏", "\\int": "∫", "\\partial": "∂", "\\sqrt": "√", "\\angle": "∠", "\\circ": "°"
+                "\\zeta": "ζ", "\\eta": "η", "\\theta": "θ", "\\iota": "ι", "\\kappa": "κ", "\\lambda": "λ",
+                "\\mu": "μ", "\\nu": "ν", "\\xi": "ξ", "\\pi": "π", "\\rho": "ρ", "\\sigma": "σ", "\\tau": "τ",
+                "\\upsilon": "υ", "\\phi": "φ", "\\varphi": "φ", "\\chi": "χ", "\\psi": "ψ", "\\omega": "ω",
+                "\\Gamma": "Γ", "\\Delta": "Δ", "\\Theta": "Θ", "\\Lambda": "Λ", "\\Xi": "Ξ", "\\Pi": "Π",
+                "\\Sigma": "Σ", "\\Phi": "Φ", "\\Psi": "Ψ", "\\Omega": "Ω",
+                "\\sum": "∑", "\\prod": "∏", "\\int": "∫", "\\iint": "∬", "\\oint": "∮", "\\lim": "lim",
+                "\\log": "log", "\\ln": "ln", "\\lg": "lg", "\\sin": "sin", "\\cos": "cos", "\\tan": "tan",
+                "\\cot": "cot", "\\sec": "sec", "\\csc": "csc", "\\arcsin": "arcsin", "\\arccos": "arccos", "\\arctan": "arctan",
+                "\\max": "max", "\\min": "min", "\\sup": "sup", "\\inf": "inf", "\\det": "det", "\\exp": "exp",
+                "\\angle": "∠", "\\triangle": "△", "\\circ": "°", "\\perp": "⊥", "\\parallel": "∥", "\\mid": "|",
+                "\\overline": "", "\\vec": "", "\\hat": "", "\\bar": "", "\\tilde": "", "\\widehat": "", "\\overrightarrow": ""
             };
             /* 先替换长命令，避免 \le 抢先于 \leq */
             var keys = Object.keys(map).sort(function (a, b) { return b.length - a.length; });
             for (var i = 0; i < keys.length; i++) {
                 t = t.split(keys[i]).join(map[keys[i]]);
             }
-            /* \frac{a}{b} → (a)/(b) */
-            t = t.replace(/\\frac\s*\{([^{}]*)\}\s*\{([^{}]*)\}/g, "($1)/($2)");
+            /* \frac{a}{b} / \dfrac 嵌套 → (a)/(b)，由内向外替换多轮 */
+            for (var fr = 0; fr < 3; fr++) {
+                var before = t;
+                t = t.replace(/\\frac\s*\{([^{}]*)\}\s*\{([^{}]*)\}/g, "($1)/($2)");
+                if (t === before) break;
+            }
+            /* \sqrt[n]{x} / \sqrt{x} */
+            t = t.replace(/\\sqrt\s*\[([^\]]*)\]\s*\{([^{}]*)\}/g, "$1√($2)");
             t = t.replace(/\\sqrt\s*\{([^{}]*)\}/g, "√($1)");
             /* \text{...} / \mathrm{...} → 原内容 */
-            t = t.replace(/\\(?:text|mathrm|mathbf|mathit|operatorname)\s*\{([^{}]*)\}/g, "$1");
+            t = t.replace(/\\(?:text|textrm|mathrm|mathbf|mathit|mathbb|mathcal|operatorname)\s*\{([^{}]*)\}/g, "$1");
+            /* 间距命令、换行命令 */
+            t = t.replace(/\\(?:quad|qquad|,|;|:|!| )/g, " ");
+            t = t.replace(/\\\\/g, " ");
             /* 去掉剩余反斜杠命令 */
             t = t.replace(/\\[a-zA-Z]+\s*/g, "");
             /* 清理花括号、上下标标记 */
             t = t.replace(/[\{\}]/g, "");
-            t = t.replace(/\^/g, "^").replace(/_/g, "_");
             /* 去掉残留的 $ 定界符 */
             t = t.replace(/\$\$?/g, "");
             return t;
@@ -9029,9 +9155,11 @@ var IndoorRouter = (function () {
                     /* 剥离首尾定界符 */
                     expr = expr.replace(/^\$\$?/, "").replace(/\$\$?$/, "").replace(/^\\\(/, "").replace(/\\\)$/, "").replace(/^\\\[/, "").replace(/\\\]$/, "");
                     try {
-                        html += window.katex.renderToString(expr, { displayMode: display, throwOnError: false, errorColor: "#475569", output: "html" });
+                        /* throwOnError=true：解析失败立即捕获，走可读文本降级，
+                         * 绝不让 KaTeX 把 \frac \right 等原始命令直接吐到界面上 */
+                        html += window.katex.renderToString(expr, { displayMode: display, throwOnError: true, output: "html" });
                     } catch (e) {
-                        html += esc(raw); /* 渲染失败时显示原始文本 */
+                        html += '<span style="color:#334155">' + esc(latexToPlain(expr)) + '</span>';
                     }
                 }
             }
@@ -10368,6 +10496,7 @@ var IndoorRouter = (function () {
 
             /* 抽取为闭包 paintRecs(recsArr)，便于 AI 推题返回后合并重渲染 */
             var _recFallbackBusy = false; /* 兜底推题进行中，避免重复发起 */
+            var _recFallbackDone = false; /* 独立推题已交付过，避免主管线结果触发第二轮重复生成 */
             function paintRecs(recsArr) {
                 /* 缓存最近一版渲染输入，供 KaTeX 晚加载后重绘 */
                 if (recsArr && recsArr.length) _wqLastRecs = recsArr;
@@ -10458,14 +10587,21 @@ var IndoorRouter = (function () {
                     if (html) el.innerHTML = html;
                     else if (_wqRecsDelivered) el.innerHTML = '<div style="color:#64748b;padding:16px;text-align:center;font-size:13px">推荐题已生成完毕</div>';
                     else {
-                        /* 主流水线没给出推荐题：独立 AI 兜底生成，保证一定能出题 */
-                        el.innerHTML = '<div style="color:#6366f1;padding:16px;text-align:center;font-size:13px;line-height:1.7">🔄 正在生成分层推荐题…</div>';
-                        if (!_recFallbackBusy) {
+                        /* 主流水线没给出推荐题：先秒级铺出三档骨架，再由独立 AI 填充内容 */
+                        var sk = "";
+                        for (var ti = 0; ti < WQ_REC_TIERS.length; ti++) {
+                            sk += '<div class="wq-rec-card" style="opacity:.75">' +
+                                '<div style="font-size:13px;font-weight:700;color:#4338ca;margin-bottom:6px">' + WQ_REC_TIERS[ti].label + '</div>' +
+                                '<div style="color:#6366f1;font-size:13px">🔄 正在生成题目与完整解答…</div></div>';
+                        }
+                        el.innerHTML = sk;
+                        if (!_recFallbackBusy && !_recFallbackDone) {
                             _recFallbackBusy = true;
                             aiRecommendQuestions(origText, sub, _wqKps, origDiff, function (err, fb) {
                                 _recFallbackBusy = false;
                                 if (_renderToken !== _wqRenderSeq) return; /* 界面已重渲染：丢弃旧题结果 */
                                 if (!err && fb && fb.length) {
+                                    _recFallbackDone = true;
                                     _wqRecsDelivered = true;
                                     paintRecs(fb.slice(0, 3));
                                 } else if (!_wqRecsDelivered && el) {
@@ -10659,8 +10795,8 @@ var IndoorRouter = (function () {
                             }
                             /* 先秒级展示主管线已有的推荐题，用户不用等 */
                             if (aiRecs.length) paintRecs(aiRecs.slice(0, 6));
-                            /* 已有一轮独立推题在进行时不再重复发起（那一轮带校验） */
-                            if (_recFallbackBusy) return;
+                            /* 已有一轮独立推题在进行或已交付时不再重复发起（那一轮带校验） */
+                            if (_recFallbackBusy || _recFallbackDone) return;
                             _recFallbackBusy = true;
                             var recEl = document.getElementById("wqRecList");
                             if (recEl && !aiRecs.length) recEl.innerHTML = '<div style="color:#6366f1;padding:16px;text-align:center;font-size:13px">🔄 正在生成分层推荐题…</div>';
@@ -10674,6 +10810,7 @@ var IndoorRouter = (function () {
                                     }
                                     return;
                                 }
+                                _recFallbackDone = true;
                                 var fb = fallbackRecs.map(function (rq) {
                                     var rText = (rq.text || "").replace(/\r\n/g, "\n").replace(/\n{3,}/g, "\n\n").replace(/[ \t]+/g, " ").trim();
                                     return {
