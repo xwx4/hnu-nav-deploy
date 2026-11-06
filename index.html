@@ -10990,7 +10990,8 @@ var IndoorRouter = (function () {
                         },
                         /* ③ 推荐题：只认「分层生成 + 专门校验 AI」的权威结果（严格 L+1、答案写透、固定三档）；
                          *    主管线给出的题仅在权威结果失败时兜底，绝不先预览再替换（避免闪烁） */
-                        onRecs: function (aiRecsRaw) {
+                        onRecs: (function () {
+                        var handler = function (aiRecsRaw) {
                             if (!_pipeAlive()) return; /* 旧轮次：丢弃 */
                             var aiRecs = [];
                             if (aiRecsRaw && aiRecsRaw.length) {
@@ -11059,7 +11060,12 @@ var IndoorRouter = (function () {
                                 /* 校验后的权威结果直接替换预览（固定 3 道） */
                                 paintRecs(fb.slice(0, 3));
                             });
-                        },
+                        };
+                        /* 不等主管线跑到 ##推荐##：分析一开始就并行发起分层推题，
+                         * 主管线只负责讲解与母题，避免长管线把推题一起拖死 */
+                        setTimeout(function () { try { handler([]); } catch (e) {} }, 0);
+                        return handler;
+                        })(),
                         onDone: function (err) {
                             if (!_pipeAlive()) return; /* 旧轮次：丢弃 */
                             /* 强制刷新最后一帧渲染，避免末尾内容丢失 */
