@@ -7001,19 +7001,19 @@ var IndoorRouter = (function () {
             apiKey: "",
             /* 模型路由：根据任务类型选择最合适的模型（主模型 + 降级备选） */
             modelRouter: {
-                analyze:  ["deepseek-v4.1-flash", "glm-5.3", "hy3"],       /* 学科/题型/难度/知识点分析（快、省） */
-                explain:  ["deepseek-v4-pro", "glm-5.3", "kimi-k3.1-pro"], /* 讲透原题/母题/知识点（推理强） */
-                generate: ["kimi-k3.1-pro", "deepseek-v4-pro", "glm-5.3"],/* 生成推荐题/变式题（生成质量高） */
-                score:    ["deepseek-v4.1-flash", "glm-5.3", "hy3"],       /* 质量评分/权威性判断 */
-                mother:   ["deepseek-v4-pro", "glm-5.3", "kimi-k3.1-pro"], /* 母题溯源 */
-                recommend:["kimi-k3.1-pro", "deepseek-v4-pro", "glm-5.3"],/* 分层推荐 */
-                pipeline: ["deepseek-v4.1-flash", "deepseek-v4-pro", "glm-5.3"], /* 一站式讲解+母题+推题（秒级响应，flash优先） */
-                current:  ["kimi-k3.1-pro", "glm-5.3", "deepseek-v4-pro"],       /* 时效性问题（近期事件/明星/体育/游戏版本），优先知识更新快的模型 */
-                vision:   ["glm-5.3", "deepseek-v4.1-flash"]                        /* 图片多模态识别 */
+                analyze:  ["hy3", "glm-5.3"],                              /* 学科/题型/难度/知识点分析（最快） */
+                explain:  ["glm-5.3", "hy3"],                              /* 讲透原题/母题/知识点（推理强） */
+                generate: ["glm-5.3", "hy3"],                              /* 生成推荐题/变式题（生成质量高） */
+                score:    ["hy3", "glm-5.3"],                              /* 质量评分/权威性判断 */
+                mother:   ["glm-5.3", "hy3"],                              /* 母题溯源 */
+                recommend:["glm-5.3", "hy3"],                              /* 分层推荐 */
+                pipeline: ["glm-5.3", "hy3"],                              /* 一站式讲解+母题+推题 */
+                current:  ["glm-5.3", "hy3"],                              /* 时效性问题 */
+                vision:   ["glm-5.3", "hy3"]                               /* 图片多模态识别 */
             },
             /* 默认 Provider（兼容旧逻辑） */
             providers: [
-                { id: "default", name: "Tencent-TokenHub", endpoint: "https://tokenhub.tencentmaas.com/v1/chat/completions", apiKey: "", model: "deepseek-v4-pro", enabled: true }
+                { id: "default", name: "Tencent-TokenHub", endpoint: "https://tokenhub.tencentmaas.com/v1/chat/completions", apiKey: "", model: "glm-5.3", enabled: true }
             ],
             /* 评分权重（0-1） */
             scoreWeights: {
