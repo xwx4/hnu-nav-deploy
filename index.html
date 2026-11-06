@@ -7032,8 +7032,8 @@ var IndoorRouter = (function () {
             qualityWeights: { ai: 0.4, answer: 0.3, source: 0.2, dedup: 0.1 },
             /* 超时（ms）—— 15s 未响应即降级，保证秒级体感 */
             timeout: 15000,
-            /* 流式首字看门狗：20s 还没吐出第一个字就判定该模型卡死，立刻换下一个 */
-            streamFirstTokenTimeout: 20000,
+            /* 流式首字看门狗：30s 还没吐出第一个字就判定该模型卡死，立刻换下一个 */
+            streamFirstTokenTimeout: 30000,
             /* 流式空闲看门狗：出字之后每段间隔超过 60s 才放弃 */
             streamIdleTimeout: 60000
         };
@@ -7667,11 +7667,10 @@ var IndoorRouter = (function () {
                 { role: "user", content: userContent }
             ];
             var taskType = imgList.length ? "vision" : "analyze";
-            /* 分析是小 JSON：文本题让 flash 与 pro 并行竞速，谁先给出有效结果就用谁，尾延迟砍半；
-             * 图片题仍走视觉模型（单路，避免重复上传大图） */
+            /* 分析是小 JSON：单路 hy3 即可，避免与讲解/推题抢通道 */
             var _doCall = imgList.length
                 ? function (handler) { WQ_AI_ROUTER.call(messages, "vision", handler, { timeout: 15000 }); }
-                : function (handler) { WQ_AI_ROUTER.race(messages, ["analyze", "explain"], handler, { timeout: 9000 }); };
+                : function (handler) { WQ_AI_ROUTER.call(messages, "analyze", handler, { timeout: 12000 }); };
             _doCall(function (err, res) {
                 if (err) { cb(err, null); return; }
                 var result = null;
@@ -8152,7 +8151,6 @@ var IndoorRouter = (function () {
             }
             /* 8 秒红线：已有内容就先展示；完全没内容则继续等，骨架屏不闪 */
             var guard = setTimeout(function () {
-                ensureThree();
                 if (delivered) return;
                 var partial = mergeWQRecs(aiQs, [], text, target);
                 if (!partial.length) return;
@@ -8402,8 +8400,13 @@ var IndoorRouter = (function () {
                 };
             }
 
-            genBatch([WQ_REC_TIERS[0], WQ_REC_TIERS[1]], onBatch("b1"), "pipeline", function (part) { onPartialBatch("b1", part); });
-            genBatch([WQ_REC_TIERS[2]], onBatch("b2"), "pipeline", function (part) { onPartialBatch("b2", part); });
+            /* 错峰起跑：两批不要同时抢通道，避免首字互相拖慢 */
+            setTimeout(function () {
+                genBatch([WQ_REC_TIERS[0], WQ_REC_TIERS[1]], onBatch("b1"), "pipeline", function (part) { onPartialBatch("b1", part); });
+            }, 300);
+            setTimeout(function () {
+                genBatch([WQ_REC_TIERS[2]], onBatch("b2"), "pipeline", function (part) { onPartialBatch("b2", part); });
+            }, 900);
         }
 
         /* 合并本轮 AI 题目并去重，固定取 3 道（题库题不得混入） */
