@@ -8136,9 +8136,16 @@ var IndoorRouter = (function () {
                 return;
             }
 
-            var aiQs = [], delivered = false, aiFinished = false, hardFired = false;
+            var aiQs = [], delivered = false, aiFinished = false, hardFired = false, topUpStarted = false;
+            /* 缺档兜底：无论两批是否都结束，只要过了红线还不满三道，就立刻用 AI 补缺失档位 */
+            function ensureThree() {
+                if (aiQs.length >= 3 || topUpStarted) return;
+                topUpStarted = true;
+                topUp(0);
+            }
             /* 8 秒红线：已有内容就先展示；完全没内容则继续等，骨架屏不闪 */
             var guard = setTimeout(function () {
+                ensureThree();
                 if (delivered) return;
                 var partial = mergeWQRecs(aiQs, [], text, target);
                 if (!partial.length) return;
@@ -8147,6 +8154,7 @@ var IndoorRouter = (function () {
             }, 8000);
             /* 20 秒硬截止：仍未出题则展示可重试状态，绝不无限转圈；AI 晚到仍会静默补齐 */
             var hardGuard = setTimeout(function () {
+                ensureThree();
                 if (hardFired) return;
                 hardFired = true;
                 delivered = true;
@@ -8321,7 +8329,7 @@ var IndoorRouter = (function () {
                 var sig = sigOf(three);
                 if (sig !== lastSig) { lastSig = sig; cb(null, three); }
                 /* 后台校验：发现不合格题目时静默替换，不打断阅读 */
-                if (aiQs.length < 3) topUp(0);
+                if (aiQs.length < 3) ensureThree();
                 verifyAndRepair(aiQs.slice(0, 3), function (fixed) {
                     if (!fixed || !fixed.length) return;
                     var merged = mergeWQRecs(aiQs.map(function (q, i) { return fixed[i] || q; }), [], text, target);
