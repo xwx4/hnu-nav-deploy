@@ -8765,18 +8765,36 @@ var IndoorRouter = (function () {
                         var c = {};
                         for (var k in item) c[k] = item[k];
                         delete c.imgs;
+                        /* explain 与 analysis 内容重复，先把这份冗余去掉再谈删分析快照 */
+                        delete c.explain;
                         if (typeof c.text === "string" && c.text.length > 800) c.text = c.text.slice(0, 800);
-                        if (c.analysis) {
-                            c.analysis = { subject: c.analysis.subject, qtype: c.analysis.qtype, kps: c.analysis.kps, diff: c.analysis.diff, error: c.analysis.error };
-                        }
                         return c;
                     });
                     localStorage.setItem(WQ_KEY, JSON.stringify({ v: WQ_STORAGE_VERSION, data: slim }));
                     showToast("⚠ 存储空间紧张，已保存为精简版（图片未保留）");
                     return true;
-                } catch (e2) {
-                    showToast("⚠ 错题本存储空间不足，保存失败，请先清理部分旧错题");
-                    return false;
+                } catch (e1) {
+                    /* 仍然超限：最后才丢弃分析快照的 HTML，只留元数据
+                     * （此时「查看原分析」会提示快照缺失并自动重新分析） */
+                    try {
+                        var slim2 = list.map(function (item) {
+                            var c = {};
+                            for (var k in item) c[k] = item[k];
+                            delete c.imgs;
+                            delete c.explain;
+                            if (typeof c.text === "string" && c.text.length > 800) c.text = c.text.slice(0, 800);
+                            if (c.analysis) {
+                                c.analysis = { subject: c.analysis.subject, qtype: c.analysis.qtype, kps: c.analysis.kps, diff: c.analysis.diff, error: c.analysis.error };
+                            }
+                            return c;
+                        });
+                        localStorage.setItem(WQ_KEY, JSON.stringify({ v: WQ_STORAGE_VERSION, data: slim2 }));
+                        showToast("⚠ 存储空间严重不足，已省略分析快照（图片未保留）");
+                        return true;
+                    } catch (e2) {
+                        showToast("⚠ 错题本存储空间不足，保存失败，请先清理部分旧错题");
+                        return false;
+                    }
                 }
             }
         }
@@ -11667,6 +11685,9 @@ var IndoorRouter = (function () {
         function restoreWQAnalysis(item) {
             var an = item.analysis;
             if (!an) return;
+            /* 旧记录可能只存到空壳或半截快照：先判断内容量，太短就直接重新分析，
+             * 避免打开后一片空白、看起来像「查看不到」 */
+            var snapLen = ((an.aiResultHtml || "").length) + ((an.recommendHtml || "").length);
             closeWQList();
             openWQ();
             /* 恢复题干文本和图片 */
@@ -11696,6 +11717,16 @@ var IndoorRouter = (function () {
                 if (label) label.style.display = "flex";
             }
             try { wqSyncInputMode(); } catch (e) { /* 忽略 */ }
+            if (snapLen < 200) {
+                /* 没有可用快照：直接按题目重新跑一遍分析 */
+                console.info("[WQ] 原分析快照为空，转为重新分析 len=" + snapLen);
+                showToast("该记录未保存分析快照，正在重新分析…");
+                setTimeout(function () {
+                    var btn = document.getElementById("wqAiBtn");
+                    if (btn) btn.click();
+                }, 200);
+                return;
+            }
             /* 恢复分析元数据 */
             _wqSubject = an.subject;
             _wqQtype = an.qtype;
@@ -11725,6 +11756,13 @@ var IndoorRouter = (function () {
                     }
                 });
             }
+            /* 恢复完成：把分析区滚到视野内，确保用户一眼能看到 */
+            setTimeout(function () {
+                var el = document.getElementById("wqRecommend");
+                if (el && el.style.display !== "none" && el.scrollIntoView) {
+                    try { el.scrollIntoView({ behavior: "smooth", block: "start" }); } catch (e) { el.scrollIntoView(); }
+                }
+            }, 80);
             showToast("📖 已恢复原分析内容");
         }
         function openWQList() {
