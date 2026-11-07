@@ -7480,6 +7480,9 @@ var IndoorRouter = (function () {
                 /* 主通道没内容（402/超时/空响应）→ 立即切 Cloudflare Workers AI 流式兜底 */
                 function tryCfFallback() {
                     if (finished) return;
+                    /* 视觉请求绝不降级 CF 文本模型：看不到图会编造「没有图片」的假内容，
+                     * 交回上层（callStream/hedgeStream）换下一个视觉模型 */
+                    if (wqHasImageParts(messages)) { finish(new Error("vision_failed"), null); return; }
                     if (fellBack) { finish(new Error("all_failed"), null); return; }
                     fellBack = true;
                     armTimer(60000);
@@ -7670,7 +7673,7 @@ var IndoorRouter = (function () {
         function aiAnalyzeQuestion(text, cb, imgDataUrl, textIsQuestion) {
             if (!WQ_AI_CONFIG.enabled) { cb(new Error("ai_disabled"), null); return; }
             var sysPrompt = "你是一位经验丰富的教研组长。请分析题目，严格按JSON返回（不要其他文字）：" +
-                '{"subject":"学科(数学/物理/化学/生物/语文/英语/政治/历史/地理/体育/其他)","qtype":"题型(选择题/填空题/解答题/证明题/计算题/简答题/作文/阅读理解/其他)","diff":1-10,"kps":["知识点1","知识点2"],"errorCause":"最可能的错因(careless粗心/concept概念不清/method方法未掌握/comprehensive综合能力不足/review审题失误)","timeSensitive":true/false}' +
+                '{"subject":"学科(数学/物理/化学/生物/语文/英语/政治/历史/地理/体育/其他)","qtype":"题型(选择题/填空题/解答题/证明题/计算题/简答题/作文/阅读理解/其他)","diff":1-10,"kps":["知识点1","知识点2"],"errorCause":"最可能的错因(careless粗心/concept概念不清/method方法未掌握/comprehensive综合能力不足/review审题失误)","timeSensitive":true/false,"visualMode":"text/visual/mixed"}' +
                 "【学科判断要宽泛，禁止轻易返回「其他」】" +
                 "现代物理（宇宙、高维、弦理论、量子、相对论、黑洞、引力、粒子、暗物质、时空、维度等）属于物理；" +
                 "前沿化学（纳米、材料、分子机器、催化等）属于化学；" +
@@ -7687,14 +7690,19 @@ var IndoorRouter = (function () {
                 "【非标准分析题难度】涉及预测未来、趋势分析、观点评价、原因探究、开放性论述、跨领域综合分析等需要知识运用和推理能力的题目，难度不应低于4级（需一定分析能力），开放性强、无固定答案的可给5-7级。只有纯记忆/纯事实陈述才给1-2级。" +
                 "【严格上限】常规求导/零点/参数范围/单调性/极值题≤8；只有竞赛题、需构造辅助函数、证明复杂不等式、组合计数等才给9；只有科研级开放题才给10。知识点要精准，2-4个。" +
                 "【timeSensitive 字段】若题目涉及体育赛事/明星动态/游戏版本/时事热点/政策法规/统计数据/未来预测/趋势分析/发展变化等可能随时间变化或需要最新数据支撑的内容，timeSensitive 设为 true，否则 false。" +
+                "【visualMode 字段（仅当有图片时需要判断，无图片固定 \"text\"）】判断图片中信息的承载方式：" +
+                "\"text\"=图片的价值几乎全在文字上（试卷/题目截图、文档、聊天记录、长文材料），画面本身没有额外信息；" +
+                "\"visual\"=图片几乎没有文字、或关键信息全在画面而非文字（纯漫画、几何图形、函数图象、照片、示意图、表情包、无字场景图），把画面转述成文字必然丢失关键信息；" +
+                "\"mixed\"=文字与画面缺一不可（带文字气泡的漫画、带字母标注的几何图、带图例的统计图表、图文并茂的题目）。" +
                 "【重要】返回的 JSON 中必须包含 \"text\" 字段：若有图片，text 为从图片中提取的完整题目原文（不要只写用户输入的指令）；若无图片，text 为用户输入的题目原文。" +
-                "【图片题必须描述画面】若题目本身依赖图像（漫画/表情包/图表/几何图/流程图等），text 除图内文字外，还必须完整描述画面内容（人物、动作、文字气泡、标注、关键细节与反差），后续讲解只能依据 text，看不到原图，描述不全会导致讲解答非所问。" +
+                "【text 字段写法按 visualMode 区分】visualMode=\"text\" 时：text 除图内文字外，若题目本身依赖图像（漫画/表情包/图表/几何图/流程图等），还必须完整描述画面内容（人物、动作、文字气泡、标注、关键细节与反差），因为后续讲解只能依据 text、看不到原图，描述不全会导致讲解答非所问；" +
+                "visualMode=\"visual\" 或 \"mixed\" 时：后续讲解会直接看到原图，text 只需给出题目涉及的文字与 1-2 句画面核心概括即可，不必逐细节转述画面。" +
                 "【长图/聊天记录/材料文本】图片可能是很长的截图（聊天记录、对话、长文材料）。必须完整提取图内所有可见文字内容作为 text（保留对话双方与顺序），不得只提取其中一句，也不得声称「未提供材料」。若图内是一段对话/文章，text 就是这段对话/文章的完整原文，再据此分析其考查意图。" +
                 "【指令与材料区分】文本框输入若为分析要求（如「分析对话中人物性格」），它只是指令，不是题目材料；题目材料必须来自图片本身，text 必须是图片内容的完整原文。" +
                 "\n【多题检测（灵活判断）】仅当内容中存在多道彼此独立、各自有完整题干和答案的题目时才拆分。" +
                 "判断原则：① 对话/聊天记录/连续段落/阅读理解（含多个小问但共享同一材料）→ 视为【一道题】，不要拆分；" +
                 "② 只有出现明显题号（1. 2. 3. 或 (1)(2)(3) 或 一、二、三）且每道题题干完整、彼此无依赖时才拆分为多题；" +
-                "③ 拿不准时，一律按单题处理。拆分时返回 {\"questions\":[{\"text\":\"第一题完整题干\",\"subject\":...,\"qtype\":...,\"diff\":...,\"kps\":[...],\"errorCause\":...},...]}，每道题独立分析。若只有一道题，按原格式返回。";
+                "③ 拿不准时，一律按单题处理。拆分时返回 {\"questions\":[{\"text\":\"第一题完整题干\",\"subject\":...,\"qtype\":...,\"diff\":...,\"kps\":[...],\"errorCause\":...,\"visualMode\":\"text/visual/mixed\"},...]}，每道题独立分析（visualMode 按每道题所依赖的图片区域单独判断）。若只有一道题，按原格式返回。";
             var userContent;
             var imgList = imgDataUrl ? (Array.isArray(imgDataUrl) ? imgDataUrl : [imgDataUrl]) : [];
             if (imgList.length) {
@@ -7737,6 +7745,8 @@ var IndoorRouter = (function () {
                     if (m) result = JSON.parse(m[0]);
                 } catch (e) { /* 解析失败 */ }
                 if (!result) { cb(new Error("parse_failed"), null); return; }
+                /* visualMode 规范化：仅 visual/mixed 两种合法值，无图片时强制 text */
+                var _normVm = function (v) { return (v === "visual" || v === "mixed") ? v : "text"; };
                 /* 多题模式：规范化每道题字段 */
                 if (Array.isArray(result.questions) && result.questions.length) {
                     result.questions = result.questions.map(function (q) {
@@ -7745,6 +7755,7 @@ var IndoorRouter = (function () {
                         q.qtype = q.qtype || "解答题";
                         q.kps = (q.kps || []).filter(function (k) { return k && k.length; });
                         q.timeSensitive = q.timeSensitive === true || isTimeSensitive(q.text || "");
+                        q.visualMode = imgList.length ? _normVm(q.visualMode) : "text";
                         return q;
                     });
                     cb(null, result);
@@ -7756,6 +7767,7 @@ var IndoorRouter = (function () {
                 result.qtype = result.qtype || "解答题";
                 result.kps = (result.kps || []).filter(function (k) { return k && k.length; });
                 result.timeSensitive = result.timeSensitive === true || isTimeSensitive(text || "");
+                result.visualMode = imgList.length ? _normVm(result.visualMode) : "text";
                 cb(null, result);
             });
         }
@@ -7926,15 +7938,18 @@ var IndoorRouter = (function () {
          * 输入：原题文本、学科、知识点、原题难度
          * 输出：{ explain, mother:{text,answer,kpExplain,relation}, recs:[{text,answer,solution,diff,layer}] }
          * ================================================================ */
-        function aiFullPipeline(text, subject, kps, origDiff, cbs, searchContext) {
+        function aiFullPipeline(text, subject, kps, origDiff, cbs, searchContext, visionImgs) {
             /* cbs: { onExplain(text), onMother(mother), onRecs(recs), onDone(err) }
              * searchContext: 联网搜索结果文本（时敏题传入），为 null 时不使用
+             * visionImgs: 原题图片切片数组（visual/mixed 模式传入）——讲解直接看原图，
+             *             避免把纯视觉画面降级转述成文字造成信息损耗；text 模式传 null 保持原逻辑
              * 采用流式分段输出：讲解 → 母题 → 推荐题，讲解秒级首字呈现 */
             if (!WQ_AI_CONFIG.enabled) { if (cbs.onDone) cbs.onDone(new Error("ai_disabled")); return; }
             var kpList = (kps && kps.length) ? kps.join("、") : "（请根据题目内容判断）";
             var d = Math.max(1, Math.min(10, origDiff || 5));
             var targetD = Math.min(10, d + 1); /* 严格 L+1，满级推满级 */
             var hasSearch = searchContext && searchContext.trim().length > 0;
+            var hasVision = !!(visionImgs && visionImgs.length);
             /* 把搜索结果包装成「最新背景资料」，严禁 AI 提及搜索/联网/线索等来源字眼 */
             var searchBlock = hasSearch
                 ? "\n【最新背景资料】\n" + searchContext + "\n"
@@ -7957,6 +7972,9 @@ var IndoorRouter = (function () {
                 (hasSearch
                     ? "【重要纪律】回答时直接给出最新、最准确的信息，自然流畅地作答。绝对不要出现「搜索」「联网」「线索」「背景资料」「根据你提供的」「如上所示」等任何暴露信息来源的字眼，就像你本来就知道这些最新事实一样。"
                     : "【时效性】若题目涉及体育赛事、明星动态、游戏版本、时事热点等可能随时间变化的内容，请基于你最新的知识库给出最准确的回答，不要使用过时的年份或数据。如果你不确定最新情况，就基于你掌握的最新信息回答，不要刻意强调知识截止。") +
+                (hasVision
+                    ? "【原图直接可见】本题的原图已附在消息中，你能直接看到图中全部视觉信息（画面、人物、动作、表情、场景、几何图形、标注、色彩与构图等）。讲解、母题、推荐题都必须基于图中真实内容作答，如同你亲眼所见：图中有什么就讲什么，严禁凭空想象画面，严禁说「无法看到图片」「根据文字描述」「图片中可能有」之类的措辞，也不要提及图片由谁提供。"
+                    : "") +
                 searchBlock +
                 "数学公式用LaTeX，如$x^2$、$\\frac{a}{b}$。配图必须准确应景、直接对应题目内容，在需要可视化辅助理解的位置插入 [IMG:描述]。描述要具体到画面要素（物体、位置、标注、场景），例如[IMG:正四面体ABCD，每条棱接电阻R，求AB间等效电阻]、[IMG:抛物线y=x²上有两点A(1,1)和B(2,4)，连接AB]。严禁配与题目无关的抽象图或装饰图。>\n\n" +
                 "##母题##\n题干：<追溯到该知识点最根本、最原型的母题题干，要有强母题性——能衍生出一类题的典型原型题>\n答案：<母题答案与解析，采用最优/最经典解法>\n知识点：<讲透母知识点：本质、定义、核心公式/定理、适用边界、常见误区，覆盖所有知识源，精当概括>\n演变：<原题如何从母题演变而来，说清变式路径>\n\n" +
@@ -7965,12 +7983,24 @@ var IndoorRouter = (function () {
                 "【难度铁律】3道题难度均为L" + targetD + "（=原题难度L" + d + "+1），必须是真·难度提升：①不能只是把原题拆成小问、不能只改数字、不能截取原题片段；②必须在原题基础上增加思维深度、步骤复杂度、综合性或开放性；③英语/语文阅读题必须使用全新的语篇材料（严禁截取原题段落），题目考查能力必须高于原题。\n" +
                 "3道题分层：①基础巩固（同知识点直接应用，但比原题多一步推理）②变式迁移（变形/换元/迁移/逆向）③拓展探究（深化/探索/跨知识点融合/开放性）。解析必须采用最优/最简洁的解法，直接给最终正确解法，严禁出现「不对/错了/改为」等自我纠错痕迹；代码类题目的代码必须用 ```语言 围栏并保留缩进，代码内不要使用 $...$。3道题之间必须完全不同，严禁出现两道雷同题。题干中若含表格/数据列表，可用换行分行排列数据，使其清晰易读；纯文字题干保持紧凑单行。\n\n" +
                 "##END##";
+            var userText = "学科：" + (subject || "未确定") + "\n知识点：" + kpList + "\n原题难度：L" + d + "\n原题：" + text;
+            var userContent = userText;
+            if (hasVision) {
+                /* visual/mixed：原图随消息一起发给视觉模型，讲解直接看图，不经文字转述降级 */
+                userContent = [{ type: "text", text: userText }];
+                visionImgs.forEach(function (iu) {
+                    userContent.push({ type: "image_url", image_url: { url: iu } });
+                });
+            }
             var messages = [
                 { role: "system", content: sysPrompt },
-                { role: "user", content: "学科：" + (subject || "未确定") + "\n知识点：" + kpList + "\n原题难度：L" + d + "\n原题：" + text }
+                { role: "user", content: userContent }
             ];
             /* 时敏问题（近期事件/明星/体育/游戏版本）→ 路由到知识更新更快的模型 */
             var taskType = (hasSearch || _wqTimeSensitive) ? "current" : "pipeline";
+            /* 带图请求必须锁定视觉模型（deepseek 等文本模型看不到图，会编造「没有图片」的假讲解）；
+             * hedgeDelay 放宽到 8s：视觉模型读图本身要 ~10s，默认 2.5s 对冲几乎必触发、白耗一路 */
+            var streamOpts = hasVision ? { primaryModel: "hy4", hedgeModel: "kimi-k3", hedgeDelay: 8000 } : null;
 
             /* 分段标记正则：兼容半角#/全角＃、半角空格/全角空格 */
             var MARK = /[#＃]{2}[\s\u3000]*(讲解|母题|推荐|END)[\s\u3000]*[#＃]{2}/g;
@@ -8049,7 +8079,7 @@ var IndoorRouter = (function () {
                 }
                 parseMotherAndRecs(true);
                 if (cbs.onDone) cbs.onDone(null);
-            });
+            }, streamOpts);
 
             function parseMotherAndRecs(final) {
                 var mStart = findMark(acc, "母题");
@@ -8775,6 +8805,8 @@ var IndoorRouter = (function () {
         var _wqMultiQueueBusy = false; // 后台分析队列是否运行中
         var _wqCurAnalysis = null;     // 当前题目的完整分析（讲解/母题/推荐），用于保存错题本和恢复
         var _wqTimeSensitive = false;  // 当前题是否为时新消息类（需联网搜索）
+        var _wqVisualMode = "text";    // 当前题图片信息模式：text=纯文字有用 / visual=纯视觉 / mixed=文字画面皆关键
+        var _wqVisionImgs = [];        // 当前题的图片切片（visual/mixed 模式讲解阶段直接带图给视觉模型）
 
         var WQ_STORAGE_VERSION = 2;  /* 错题存储格式版本号，更新时用于迁移 */
         function getWQ() {
@@ -10144,6 +10176,8 @@ var IndoorRouter = (function () {
 
             function doAnalyze(visionImgs) {
                 _visionImgs = visionImgs || [];
+                _wqVisionImgs = _visionImgs;  /* 留存到模块级：visual/mixed 模式讲解阶段直接带图 */
+                _wqVisualMode = "text";       /* 新一轮分析先复位，等 AI 结果再按 visualMode 切换 */
                 if (_visionImgs.length) {
                     var _bytes = 0;
                     for (var _bi = 0; _bi < _visionImgs.length; _bi++) _bytes += (_visionImgs[_bi] || "").length;
@@ -10163,7 +10197,7 @@ var IndoorRouter = (function () {
                 if (Array.isArray(aiResult.questions) && aiResult.questions.length > 1) {
                     if (aiBtn) { aiBtn.disabled = false; aiBtn.textContent = "🔍 分析题目"; }
                     _wqMultiQuestions = aiResult.questions.map(function (q) {
-                        return { text: q.text || "", subject: q.subject, qtype: q.qtype, kps: q.kps || [], diff: q.diff || 5, errorCause: q.errorCause, timeSensitive: q.timeSensitive, status: "pending", explain: null, mother: null, recs: null };
+                        return { text: q.text || "", subject: q.subject, qtype: q.qtype, kps: q.kps || [], diff: q.diff || 5, errorCause: q.errorCause, timeSensitive: q.timeSensitive, visualMode: q.visualMode || "text", status: "pending", explain: null, mother: null, recs: null };
                     });
                     _wqActiveMultiIdx = 0;
                     showMultiQuestionSelector();
@@ -10200,6 +10234,7 @@ var IndoorRouter = (function () {
                 _wqDiff = sanityDiff(res.diff, _wqOrigText);
                 _wqError = res.errorCause || "method";
                 _wqTimeSensitive = res.timeSensitive === true;
+                _wqVisualMode = (res.visualMode === "visual" || res.visualMode === "mixed") ? res.visualMode : "text";
                 _wqCritique = critiqueQuestion(_wqOrigText, _wqQtype);
                 /* 更新展示 */
                 if (subjText) subjText.textContent = _wqSubject + (_wqTimeSensitive ? ' 🔍' : "");
@@ -10228,6 +10263,7 @@ var IndoorRouter = (function () {
             if (aiBtn) { aiBtn.disabled = false; aiBtn.textContent = "🔍 分析题目"; }
             showToast("分析超时，已切换为本地规则分析");
             _wqOrigText = text;
+            _wqVisualMode = "text"; /* 规则兜底拿不到 visualMode，保守走纯文本讲解 */
             _wqSubject = refineSubjectForTask(text, detectSubject(text));
             _wqQtype = detectQType(text);
             _wqKps = wqCleanKps(detectKnowledgePoints(text, _wqSubject));
@@ -10487,7 +10523,7 @@ var IndoorRouter = (function () {
                     q.status = "done";
                     renderMultiQList();
                 }
-            });
+            }, null, (q.visualMode && q.visualMode !== "text" && _wqVisionImgs.length) ? _wqVisionImgs : null);
             } catch (e) {
                 if (!done) {
                     done = true;
@@ -11281,7 +11317,7 @@ var IndoorRouter = (function () {
                                 }
                             }
                         }
-                    }, searchCtx);
+                    }, searchCtx, (_wqVisualMode !== "text" && _wqVisionImgs.length) ? _wqVisionImgs : null);
                     } catch (e) { /* 异常不影响已有展示 */ }
                 };
 
@@ -11349,11 +11385,22 @@ var IndoorRouter = (function () {
                 /* 时敏问题检测：近期事件/明星/体育/游戏版本/新闻 → 路由到知识更新更快的模型 */
                 var qaTimeSensitive = isTimeSensitive(q);
                 var taskType = qaTimeSensitive ? "current" : "pipeline";
+                /* visual/mixed 题的追问必须带原图并走视觉模型：纯视觉内容文字转述会丢失关键信息 */
+                var qaHasVision = _wqVisualMode !== "text" && _wqVisionImgs.length > 0;
+                if (qaHasVision) taskType = "vision";
+                var qaUserContent = contextText + "\n\n学生疑问：" + q;
+                if (qaHasVision) {
+                    qaUserContent = [{ type: "text", text: qaUserContent + "\n（原题图片附后，可直接看到图中全部内容，请结合图中真实画面作答）" }];
+                    _wqVisionImgs.forEach(function (iu) {
+                        qaUserContent.push({ type: "image_url", image_url: { url: iu } });
+                    });
+                }
                 var messages = [
                     { role: "system", content: "你是一位耐心的" + (sub || "全科") + "老师。学生对讲透原题的讲解有疑问，请用通俗易懂的方式解答。" +
                         "如果学生问的是讲解中某一步，先回顾那一步再解释。数学公式用LaTeX。回答要具体，不要空泛。" +
+                        (qaHasVision ? "【原图直接可见】本题原图已附在消息中，你能直接看到图中全部视觉信息，回答必须基于图中真实内容，严禁说「无法看到图片」「根据文字描述」，也不要提及图片由谁提供。" : "") +
                         "【配图】配图要准确恰当、与内容相关，有助于理解就可以配，用 [IMG:描述] 标记，不要配无关图片。" },
-                    { role: "user", content: contextText + "\n\n学生疑问：" + q }
+                    { role: "user", content: qaUserContent }
                 ];
                 /* 时敏追问：先联网搜索，再把最新信息注入 system prompt */
                 var runQa = function (searchCtx) {
