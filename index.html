@@ -7797,6 +7797,17 @@ var IndoorRouter = (function () {
                 result.visualMode = imgList.length ? _normVm(result.visualMode) : "text";
                 result.searchQuery = imgList.length ? _normSq(result.searchQuery) : "";
                 result.scene = imgList.length ? _normScene(result.scene) : "";
+                /* 视觉题整图没认出可检索线索 → 放大主体二次识别，补充画面定位与背景检索词 */
+                if (imgList.length && result.visualMode !== "text" && !result.searchQuery) {
+                    wqRefineScene(imgList, function (refined) {
+                        if (refined) {
+                            if (refined.scene) result.scene = refined.scene;
+                            if (refined.searchQuery) result.searchQuery = refined.searchQuery;
+                        }
+                        cb(null, result);
+                    });
+                    return;
+                }
                 cb(null, result);
             });
         }
@@ -8185,6 +8196,69 @@ var IndoorRouter = (function () {
                 });
                 return recs;
             }
+        }
+
+        /* 中心区域裁剪并放大：原图分辨率低或主体偏小时，整图识别常常认不出，
+         * 放大主体后视觉模型才能看清发色、眼罩/眼镜、服饰、伤情等关键特征。 */
+        function wqCropCenter(dataUrl, frac, maxW) {
+            return new Promise(function (resolve) {
+                try {
+                    var img = new Image();
+                    img.onload = function () {
+                        try {
+                            var cw = Math.round(img.width * frac), ch = Math.round(img.height * frac);
+                            var sx = Math.round((img.width - cw) / 2), sy = Math.round((img.height - ch) / 2);
+                            var scale = Math.min(2.4, maxW / cw);
+                            var cv = document.createElement("canvas");
+                            cv.width = Math.round(cw * scale);
+                            cv.height = Math.round(ch * scale);
+                            var ctx = cv.getContext("2d");
+                            ctx.imageSmoothingQuality = "high";
+                            ctx.drawImage(img, sx, sy, cw, ch, 0, 0, cv.width, cv.height);
+                            resolve(cv.toDataURL("image/jpeg", 0.9));
+                        } catch (e) { resolve(null); }
+                    };
+                    img.onerror = function () { resolve(null); };
+                    img.src = dataUrl;
+                } catch (e) { resolve(null); }
+            });
+        }
+
+        /* 二次细看：整图识别没给出可检索线索（searchQuery 为空）时，放大主体再识别一次。
+         * 只做客观识别，不预设答案，结果用于补充画面主体与背景检索词。 */
+        function wqRefineScene(imgs, cb) {
+            if (!imgs || !imgs.length) { cb(null); return; }
+            wqCropCenter(imgs[0], 0.66, 900).then(function (cropUrl) {
+                if (!cropUrl) { cb(null); return; }
+                var msgs = [
+                    { role: "system", content: "你是资深漫画/影视考据专家。看图时先在心里校正方向（图片可能被旋转或只截取了局部），先客观描述可见特征，再据特征锁定作品与角色。能确定就明确给出；不能完全确定就给最可能的一项并标注把握程度，绝不允许同时罗列多个互相矛盾的作品。" },
+                    { role: "user", content: [
+                        { type: "text", text: "请严格按JSON返回（不要其他文字）：\n" +
+                            '{"features":"关键特征：发色发型、是否戴眼罩/眼镜、服饰、伤情或异常之处","work":"作品名(无法识别填未知)","character":"角色名(无法识别填未知)","plot":"这一幕的情节或名场面","meme":"网络上对这个画面的称呼或梗名(没有填空字符串)","confidence":"高/中/低","searchQuery":"2-6个中文检索词，如 作品名 角色名 梗名"}' },
+                        { type: "image_url", image_url: { url: cropUrl } }
+                    ] }
+                ];
+                WQ_AI_ROUTER.call(msgs, "vision", function (err, res) {
+                    if (err || !res) { cb(null); return; }
+                    var content = (res && typeof res === "object") ? (res.content || "") : String(res);
+                    var j = null;
+                    try {
+                        var m = content.match(/\{[\s\S]*\}/);
+                        if (m) j = JSON.parse(m[0]);
+                    } catch (e) { j = null; }
+                    if (!j) { cb(null); return; }
+                    var hasWork = j.work && j.work !== "未知";
+                    var parts = [];
+                    if (hasWork) parts.push(j.work);
+                    if (j.character && j.character !== "未知") parts.push(j.character);
+                    if (j.plot) parts.push(j.plot);
+                    if (j.meme) parts.push(j.meme);
+                    var sq = String(j.searchQuery || "").trim();
+                    if (!sq && hasWork) sq = (j.work + " " + (j.character && j.character !== "未知" ? j.character : "")).trim();
+                    /* 识别不出作品时不覆盖原 scene，避免用空结果冲掉有效描述 */
+                    cb(hasWork ? { scene: parts.join(" / "), searchQuery: sq } : null);
+                }, { timeout: 30000 });
+            });
         }
 
         /* 统一讲解入口：调用方未提前检索、但本题需要背景知识时，先补背景再进讲解管线。
