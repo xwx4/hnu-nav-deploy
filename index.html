@@ -7723,10 +7723,10 @@ var IndoorRouter = (function () {
                 { role: "user", content: userContent }
             ];
             var taskType = imgList.length ? "vision" : "analyze";
-            /* 视觉识别需要处理图片，明显慢于纯文本：单模型给足 35s，
+            /* 视觉识别需要处理图片，明显慢于纯文本：单模型给足 45s，
              * 超时后由路由换下一个视觉模型（hy4 → kimi-k3），绝不降级到文本模型 */
             var _doCall = imgList.length
-                ? function (handler) { WQ_AI_ROUTER.call(messages, "vision", handler, { timeout: 35000 }); }
+                ? function (handler) { WQ_AI_ROUTER.call(messages, "vision", handler, { timeout: 45000 }); }
                 : function (handler) { WQ_AI_ROUTER.call(messages, "analyze", handler, { timeout: 12000 }); };
             _doCall(function (err, res) {
                 if (err) { cb(err, null); return; }
@@ -9033,7 +9033,7 @@ var IndoorRouter = (function () {
                                 catch (e) { _finish(reader.result); }
                             } catch (e) { _finish(reader.result); }
                         };
-                        img.onerror = function () { _finish(reader.result); };
+                        img.onerror = function () { _finish(null); };  /* 无法解码（如 HEIC）→ 判为失败，避免把识别不了的原始数据送给模型 */
                         img.src = reader.result;
                     } catch (e) { _finish(reader.result); }
                 };
@@ -10081,9 +10081,9 @@ var IndoorRouter = (function () {
 
             /* === 学科/知识点/难度 全部由 AI 判断 === */
             /* 纯文本 12s 内必出结果（竞速 + 规则兜底）；
-             * 含图片必须放宽：两个视觉模型串行最多 70s，界面兜底要留出余量，
+             * 含图片必须放宽：两个视觉模型串行最多 90s，界面兜底要留出余量，
              * 否则 AI 结果晚到会被丢弃，只剩下「没有图片」式的错误分析 */
-            var _analyzeTimeoutMs = _wqImgs.length ? 75000 : 12000;
+            var _analyzeTimeoutMs = _wqImgs.length ? 100000 : 12000;
             var aiTimeout = setTimeout(function () {
                 if (!_wqIsCurrentRun(_myRun)) return;
                 console.warn("[WQ] AI 分析超时，切换规则兜底");
@@ -10123,11 +10123,32 @@ var IndoorRouter = (function () {
             if (!_wqImgs.length) {
                 doAnalyze([]);
             } else {
-                buildTilesFromImgs(_wqImgs, function (tiles) { doAnalyze(tiles); });
+                buildTilesFromImgs(_wqImgs, function (tiles) {
+                    if (!tiles.length) {
+                        /* 有图但全部无法解码：绝不能退化成纯文本分析，否则模型看不到图又会编造结论 */
+                        _analysisDone = true;
+                        if (aiTimeout) { clearTimeout(aiTimeout); aiTimeout = null; }
+                        if (aiBtn) { aiBtn.disabled = false; aiBtn.textContent = "🔍 分析题目"; }
+                        var ot0 = document.getElementById("wqOcrTip");
+                        if (ot0) {
+                            ot0.removeAttribute("data-busy");
+                            ot0.style.display = "block";
+                            ot0.innerHTML = "⚠ 图片无法读取（可能是 HEIC 等不支持格式），请重新截图或改用 JPG/PNG 图片";
+                        }
+                        showToast("图片无法读取，请换一张 JPG/PNG 图片");
+                        return;
+                    }
+                    doAnalyze(tiles);
+                });
             }
 
             function doAnalyze(visionImgs) {
                 _visionImgs = visionImgs || [];
+                if (_visionImgs.length) {
+                    var _bytes = 0;
+                    for (var _bi = 0; _bi < _visionImgs.length; _bi++) _bytes += (_visionImgs[_bi] || "").length;
+                    console.info("[Vision] 切片 " + _visionImgs.length + " 张，约 " + Math.round(_bytes * 0.75 / 1024) + "KB");
+                }
             aiAnalyzeQuestion(text, function (err, aiResult) {
                 if (!_wqIsCurrentRun(_myRun)) return; /* 旧轮次：丢弃，防止串题 */
                 if (_analysisDone) return; /* 已超时兜底结算：晚到的 AI 结果丢弃，避免二次重绘 */
