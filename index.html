@@ -7798,8 +7798,9 @@ var IndoorRouter = (function () {
                 result.visualMode = imgList.length ? _normVm(result.visualMode) : "text";
                 result.searchQuery = imgList.length ? _normSq(result.searchQuery) : "";
                 result.scene = imgList.length ? _normScene(result.scene) : "";
-                /* 视觉题整图没认出可检索线索 → 放大主体二次识别，补充画面定位与背景检索词 */
-                if (imgList.length && result.visualMode !== "text" && !result.searchQuery) {
+                /* 纯视觉图一律放大主体细看一次（整图分辨率低时首轮易误判成别的作品）；
+                 * 图文混合题仅在没给出检索线索时补做 */
+                if (imgList.length && (result.visualMode === "visual" || (result.visualMode === "mixed" && !result.searchQuery))) {
                     wqRefineScene(imgList, function (refined) {
                         if (refined) {
                             if (refined.scene) result.scene = refined.scene;
