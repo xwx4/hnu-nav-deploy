@@ -7525,8 +7525,10 @@ var IndoorRouter = (function () {
                 };
                 var timedOut = false;
                 var cbDone = false;
+                var t0 = Date.now();
                 var timer = setTimeout(function () {
                     timedOut = true;
+                    if (visionReq) console.warn("[AI] " + model + " 视觉请求超时（" + (Date.now() - t0) + "ms）");
                     tryCfFallback();
                 }, timeoutMs || WQ_AI_CONFIG.timeout);
 
@@ -7565,11 +7567,26 @@ var IndoorRouter = (function () {
                     body: JSON.stringify(payload)
                 }).then(function (r) {
                     if (timedOut || cbDone) return;
-                    if (!r.ok) throw new Error("HTTP " + r.status);
+                    if (!r.ok) {
+                        /* 视觉请求报错时把上游状态与原因打出来，便于定位（如 400 内容过长/格式不支持） */
+                        if (visionReq) {
+                            return r.text().then(function (b) {
+                                console.warn("[AI] " + model + " 视觉请求失败 HTTP " + r.status + "（" + (Date.now() - t0) + "ms）：" + String(b || "").slice(0, 200));
+                                throw new Error("HTTP " + r.status);
+                            });
+                        }
+                        throw new Error("HTTP " + r.status);
+                    }
                     return r.json();
                 }).then(function (data) {
                     if (timedOut || cbDone) return;
-                    var text = (data && (data.text || data.answer || (data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content))) || "";
+                    var msg = data && data.choices && data.choices[0] && data.choices[0].message;
+                    var text = (data && (data.text || data.answer)) || (msg && (msg.content || msg.reasoning_content)) || "";
+                    if (typeof text !== "string") text = "";
+                    if (!text && visionReq) {
+                        console.warn("[AI] " + model + " 视觉请求返回空内容（" + (Date.now() - t0) + "ms），finish=" +
+                            (data && data.choices && data.choices[0] && data.choices[0].finish_reason));
+                    }
                     if (text) done(null, { provider: provider.name, text: text, raw: data });
                     else tryCfFallback();
                 }).catch(function () {
