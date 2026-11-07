@@ -1513,6 +1513,13 @@ body.no-motion .layer-base.plan-loading::after { animation: none; }
     position: absolute; top: 8px; right: 8px; background: rgba(0,0,0,.6); color: #fff;
     border: none; border-radius: 6px; padding: 4px 10px; font-size: 12px; cursor: pointer;
 }
+/* 「继续上传」：手机拍照一次只能拍一张，必须留一个入口继续添加 */
+.wq-img-add {
+    display: inline-flex; align-items: center; gap: 4px; margin-top: 8px;
+    padding: 6px 12px; font-size: 12px; color: #1d4ed8; background: #eff6ff;
+    border: 1px dashed #93c5fd; border-radius: 6px; cursor: pointer;
+}
+.wq-img-add:hover { background: #dbeafe; border-color: #60a5fa; }
 .wq-ai-result {
     background: #f0f9ff; border: 1px solid #bae6fd; border-radius: 10px;
     padding: 12px 14px; margin-bottom: 12px;
@@ -7200,6 +7207,21 @@ var IndoorRouter = (function () {
             }
         };
 
+        /* 判断消息中是否包含图片。
+         * 视觉请求失败时绝不能降级到纯文本模型：降级模型看不到图，
+         * 会基于残缺的文字提示编造「图片里没有内容」的假分析，比直接失败更糟。 */
+        function wqHasImageParts(messages) {
+            if (!Array.isArray(messages)) return false;
+            for (var i = 0; i < messages.length; i++) {
+                var c = messages[i] && messages[i].content;
+                if (!Array.isArray(c)) continue;
+                for (var j = 0; j < c.length; j++) {
+                    if (c[j] && (c[j].type === "image_url" || c[j].type === "image")) return true;
+                }
+            }
+            return false;
+        }
+
         /* ================================================================
          * 多 AI 路由器：并行调用多个 Provider，评分选最优
          * ================================================================ */
@@ -7491,6 +7513,7 @@ var IndoorRouter = (function () {
              * Tencent 跨境失败时自动降级到 Cloudflare Workers AI 内网调用 */
             _callProvider: function (provider, messages, cb, modelOverride, timeoutMs) {
                 var model = modelOverride || provider.model;
+                var visionReq = wqHasImageParts(messages);
                 /* 先尝试 Tencent TokenHub */
                 var url = WQ_AI_CONFIG.proxyEndpoint || "/api/chat";
                 var payload = {
@@ -7516,6 +7539,9 @@ var IndoorRouter = (function () {
 
                 function tryCfFallback() {
                     if (cbDone) return;  /* 已有结果则不再降级 */
+                    /* 视觉请求直接失败：/api/chat-cf 的模型都只能读文本，
+                     * 拿不到图会编出「没有图片」的假分析，必须交回上层换视觉模型 */
+                    if (visionReq) { done(new Error("vision_failed"), null); return; }
                     /* 降级到 Cloudflare Workers AI（内网，无跨境超时） */
                     fetch("/api/chat-cf", {
                         method: "POST",
@@ -7645,6 +7671,7 @@ var IndoorRouter = (function () {
                 "【严格上限】常规求导/零点/参数范围/单调性/极值题≤8；只有竞赛题、需构造辅助函数、证明复杂不等式、组合计数等才给9；只有科研级开放题才给10。知识点要精准，2-4个。" +
                 "【timeSensitive 字段】若题目涉及体育赛事/明星动态/游戏版本/时事热点/政策法规/统计数据/未来预测/趋势分析/发展变化等可能随时间变化或需要最新数据支撑的内容，timeSensitive 设为 true，否则 false。" +
                 "【重要】返回的 JSON 中必须包含 \"text\" 字段：若有图片，text 为从图片中提取的完整题目原文（不要只写用户输入的指令）；若无图片，text 为用户输入的题目原文。" +
+                "【图片题必须描述画面】若题目本身依赖图像（漫画/表情包/图表/几何图/流程图等），text 除图内文字外，还必须完整描述画面内容（人物、动作、文字气泡、标注、关键细节与反差），后续讲解只能依据 text，看不到原图，描述不全会导致讲解答非所问。" +
                 "【长图/聊天记录/材料文本】图片可能是很长的截图（聊天记录、对话、长文材料）。必须完整提取图内所有可见文字内容作为 text（保留对话双方与顺序），不得只提取其中一句，也不得声称「未提供材料」。若图内是一段对话/文章，text 就是这段对话/文章的完整原文，再据此分析其考查意图。" +
                 "【指令与材料区分】文本框输入若为分析要求（如「分析对话中人物性格」），它只是指令，不是题目材料；题目材料必须来自图片本身，text 必须是图片内容的完整原文。" +
                 "\n【多题检测（灵活判断）】仅当内容中存在多道彼此独立、各自有完整题干和答案的题目时才拆分。" +
@@ -7679,9 +7706,10 @@ var IndoorRouter = (function () {
                 { role: "user", content: userContent }
             ];
             var taskType = imgList.length ? "vision" : "analyze";
-            /* 分析是小 JSON：单路 hy3 即可，避免与讲解/推题抢通道 */
+            /* 视觉识别需要处理图片，明显慢于纯文本：单模型给足 35s，
+             * 超时后由路由换下一个视觉模型（hy4 → kimi-k3），绝不降级到文本模型 */
             var _doCall = imgList.length
-                ? function (handler) { WQ_AI_ROUTER.call(messages, "vision", handler, { timeout: 15000 }); }
+                ? function (handler) { WQ_AI_ROUTER.call(messages, "vision", handler, { timeout: 35000 }); }
                 : function (handler) { WQ_AI_ROUTER.call(messages, "analyze", handler, { timeout: 12000 }); };
             _doCall(function (err, res) {
                 if (err) { cb(err, null); return; }
@@ -10035,8 +10063,10 @@ var IndoorRouter = (function () {
             document.getElementById("wqAiResult").style.display = "block";
 
             /* === 学科/知识点/难度 全部由 AI 判断 === */
-            /* 纯文本 12s 内必出结果（竞速 + 规则兜底）；含图片放宽到 18s */
-            var _analyzeTimeoutMs = _wqImgs.length ? 18000 : 12000;
+            /* 纯文本 12s 内必出结果（竞速 + 规则兜底）；
+             * 含图片必须放宽：两个视觉模型串行最多 70s，界面兜底要留出余量，
+             * 否则 AI 结果晚到会被丢弃，只剩下「没有图片」式的错误分析 */
+            var _analyzeTimeoutMs = _wqImgs.length ? 75000 : 12000;
             var aiTimeout = setTimeout(function () {
                 if (!_wqIsCurrentRun(_myRun)) return;
                 console.warn("[WQ] AI 分析超时，切换规则兜底");
@@ -10056,9 +10086,9 @@ var IndoorRouter = (function () {
                     if (ot) {
                         ot.removeAttribute("data-busy");
                         ot.style.display = "block";
-                        ot.innerHTML = "⚠ 图片识别超时/失败，请在下方文字框直接输入题目文字（有图时文字框将按题目处理）后重试";
+                        ot.innerHTML = "⚠ 图片识别失败（视觉模型未返回结果），请重试；或点「✕ 清除图片」后直接在文字框输入题目文字";
                     }
-                    showToast("图片识别失败，请在文字框输入题目后重试");
+                    showToast("图片识别失败，请重试或清除图片后手动输入题目");
                     return;
                 }
                 _wqOrigText = qText;
@@ -11712,6 +11742,11 @@ var IndoorRouter = (function () {
                     });
                 }
                 if (label) label.style.display = "none";
+                var addBtn2 = document.getElementById("wqImgAdd");
+                if (addBtn2) {
+                    addBtn2.style.display = _wqImgs.length >= 9 ? "none" : "inline-flex";
+                    addBtn2.textContent = "＋ 继续上传（" + _wqImgs.length + "/9）";
+                }
             } else if (prev) {
                 prev.style.display = "none";
                 if (label) label.style.display = "flex";
@@ -16922,12 +16957,24 @@ var currentIndoorBld = null;   // 当前进入楼内导航的楼栋（BUILDINGS 
                         thumbs.appendChild(wrap);
                     })(ti);
                 }
+                var addBtn = document.getElementById("wqImgAdd");
+                if (addBtn) {
+                    var full = _wqImgs.length >= 9;
+                    addBtn.style.display = full ? "none" : "inline-flex";
+                    addBtn.textContent = "＋ 继续上传（" + _wqImgs.length + "/9）";
+                }
             }
             var wqImgRemove = document.getElementById("wqImgRemove");
             if (wqImgRemove) wqImgRemove.addEventListener("click", function () {
                 _wqImgs = [];
                 renderWQImgThumbs();
                 wqSyncInputMode();
+            });
+            /* 「继续上传」：手机拍照一次只能回传一张，点此可继续追加（图库多选同样可用） */
+            var wqImgAdd = document.getElementById("wqImgAdd");
+            if (wqImgAdd) wqImgAdd.addEventListener("click", function () {
+                if (_wqImgs.length >= 9) { showToast("最多上传9张图片"); return; }
+                wqImgInput.click();
             });
             /* ---- 流水线 B：扩展题库 按钮 ---- */
             var wqExpand = document.getElementById("wqExpandBankBtn");
@@ -20122,6 +20169,7 @@ body.fire-mode #fireOverlay{display:flex}
       <input type="file" id="wqImgInput" accept="image/*" multiple style="display:none">
       <div class="wq-img-preview" id="wqImgPreview" style="display:none">
         <div id="wqImgThumbs" style="display:flex;flex-wrap:wrap;gap:6px"></div>
+        <button type="button" id="wqImgAdd" class="wq-img-add">＋ 继续上传</button>
         <button type="button" id="wqImgRemove" class="wq-img-remove">✕ 清除图片</button>
       </div>
     </div>
