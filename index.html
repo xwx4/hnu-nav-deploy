@@ -12005,7 +12005,7 @@ var IndoorRouter = (function () {
 
         /* ================================================================
          * 开发者动向监控面板（仅管理员可见）
-         * 展示：题库统计 / 用户上传好题记录 / Worker 自主更新记录 / 低分预警
+         * 展示：题库统计 / 用户上传好题记录 / 低分预警（Worker 自主找题已停用）
          * ================================================================ */
         function toggleBankMonitor() {
             var panel = document.getElementById("wqBankMonitorPanel");
@@ -12039,26 +12039,25 @@ var IndoorRouter = (function () {
             if (!body) return;
             var meta = data.meta || {};
             var userSubs = Array.isArray(data.userSubmissions) ? data.userSubmissions : [];
-            var cronRuns = Array.isArray(data.cronRuns) ? data.cronRuns : [];
             var bank = data.bank || {};
-            /* 统计总题数 */
-            var total = 0, subCnt = {};
-            for (var s in bank) {
-                var kps = bank[s] || {};
-                var subTotal = 0;
-                for (var k in kps) subTotal += ((kps[k] && kps[k].questions) || []).length;
-                subCnt[s] = subTotal;
-                total += subTotal;
+            /* 统计总题数：与「题库浏览」同一口径（getAllQuestions），
+             * 云端 KV 里的原始条数含去重前的 Worker 题，直接数会虚高（如 32 vs 16） */
+            var total = 0;
+            try { total = (WQ_PIPELINE_B.getAllQuestions() || []).length; } catch (e) { total = 0; }
+            if (!total) {
+                for (var s in bank) {
+                    var kps = bank[s] || {};
+                    for (var k in kps) total += ((kps[k] && kps[k].questions) || []).length;
+                }
             }
             /* 低分预警：用户上传且评分 < 0.7 的题 */
             var lowScore = userSubs.filter(function (u) { return u.action === "user_submit" && (u.score || 0) < 0.7; });
             var html = "";
-            /* 顶部统计 */
-            html += '<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:12px">';
+            /* 顶部统计（Worker 自主找题已停用，不再展示） */
+            html += '<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:12px">';
             html += statCard("📚 题库总量", total + " 题", "#3b82f6");
             html += statCard("🕐 最近更新", meta.updated_at ? fmtTime(meta.updated_at) : "—", "#10b981");
             html += statCard("📤 用户上传", userSubs.filter(function (u) { return u.action === "user_submit"; }).length + " 次", "#8b5cf6");
-            html += statCard("🤖 Worker 运行", cronRuns.length + " 次", "#f59e0b");
             html += "</div>";
             /* 低分预警 */
             if (lowScore.length) {
@@ -12087,24 +12086,6 @@ var IndoorRouter = (function () {
                     html += '</div>';
                     html += '<div style="color:#64748b;margin-top:2px">' + esc((u.text || "").slice(0, 150)) + '</div>';
                     html += '<div style="color:#94a3b8;font-size:11px;margin-top:2px">' + fmtTime(u.at) + '</div>';
-                    html += '</div>';
-                });
-            }
-            html += '</div>';
-            /* Worker 自主更新记录 */
-            html += '<div><b style="font-size:13px;color:#f59e0b">🤖 Worker 自主更新记录</b>';
-            if (!cronRuns.length) {
-                html += '<div style="color:#94a3b8;padding:6px 0">暂无 Worker 运行记录</div>';
-            } else {
-                cronRuns.slice(0, 10).forEach(function (r) {
-                    html += '<div style="padding:6px 8px;background:#fff;border:1px solid #e2e8f0;border-radius:6px;margin-top:6px">';
-                    html += '<div style="display:flex;justify-content:space-between;gap:8px">';
-                    html += '<span><b style="color:#10b981">入库 ' + (r.stored || 0) + '</b> / 尝试 ' + (r.attempted || 0) + '</span>';
-                    html += '<span style="color:#94a3b8;font-size:11px">' + fmtTime(r.time) + '</span>';
-                    html += '</div>';
-                    if (r.log && r.log.length) {
-                        html += '<div style="color:#64748b;margin-top:4px;font-size:11px;white-space:pre-wrap;max-height:60px;overflow-y:auto">' + esc(r.log.join("\n")) + '</div>';
-                    }
                     html += '</div>';
                 });
             }
