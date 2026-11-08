@@ -20585,7 +20585,7 @@ body.fire-mode #fireOverlay{display:flex}
 })();
 </script>
 
-<!-- TEMP TEST HOOK: ?wqtest=5 自动注入 5 张测试图片并跑分析（验证完删除） -->
+<!-- TEMP TEST HOOK: ?wqtest=5 跑真实分析；?wqsize=1 做载荷体积阶梯测试（验证完删除） -->
 <script>
 (function () {
     function patch() {
@@ -20624,13 +20624,9 @@ body.fire-mode #fireOverlay{display:flex}
             }, opts);
         };
     }
-    function makeHook() {
-        if (!/[?&]wqtest=5/.test(location.search)) return;
-        patch();
+    function loadImgs() {
         var urls = ["/_t5/1.jpg", "/_t5/2.jpg", "/_t5/3.jpg", "/_t5/4.jpg", "/_t5/5.jpg"];
-        var t0 = performance.now();
-        console.info("[T5] start");
-        Promise.all(urls.map(function (u) {
+        return Promise.all(urls.map(function (u) {
             return fetch(u).then(function (r) { return r.blob(); }).then(function (b) {
                 return new Promise(function (res) {
                     var fr = new FileReader();
@@ -20638,7 +20634,42 @@ body.fire-mode #fireOverlay{display:flex}
                     fr.readAsDataURL(b);
                 });
             });
-        })).then(function (imgs) {
+        }));
+    }
+    function makeHook() {
+        var q = location.search;
+        if (/[?&]wqsize=1/.test(q)) {
+            patch();
+            var t0 = performance.now();
+            loadImgs().then(function (imgs) {
+                console.info("[T5] size-test imgs ready", Math.round(performance.now() - t0));
+                var n = 1;
+                function next() {
+                    if (n > imgs.length) { console.info("[T5] size-test DONE", Math.round(performance.now() - t0)); return; }
+                    var content = [{ type: "text", text: "只回复两个字：收到" }];
+                    imgs.slice(0, n).forEach(function (u) { content.push({ type: "image_url", image_url: { url: u } }); });
+                    var body = JSON.stringify({
+                        endpoint: "https://tokenhub.tencentmaas.com/v1/chat/completions",
+                        model: "hy4",
+                        messages: [{ role: "user", content: content }],
+                        reasoning_effort: "none"
+                    });
+                    var t1 = performance.now();
+                    console.info("[T5] size-test n=" + n, "body=" + Math.round(body.length / 1024) + "KB");
+                    fetch("/api/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: body })
+                        .then(function (r) { return r.text().then(function (txt) { return r.status + " " + txt.length + "B"; }); })
+                        .then(function (s) { console.info("[T5] size-test n=" + n, "OK", s, Math.round(performance.now() - t1) + "ms"); n++; next(); })
+                        .catch(function (e) { console.info("[T5] size-test n=" + n, "FAIL", e && e.message, Math.round(performance.now() - t1) + "ms"); n++; next(); });
+                }
+                next();
+            });
+            return;
+        }
+        if (!/[?&]wqtest=5/.test(q)) return;
+        patch();
+        var t0 = performance.now();
+        console.info("[T5] start");
+        loadImgs().then(function (imgs) {
             window._wqImgs = imgs;
             console.info("[T5] imgs ready", imgs.length, Math.round(performance.now() - t0));
             var ta = document.getElementById("wqText"); if (ta) ta.value = "";
