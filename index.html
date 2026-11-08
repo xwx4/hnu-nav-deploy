@@ -7690,7 +7690,98 @@ var IndoorRouter = (function () {
          * 全部由 AI 完成，难度按知识点全人类分10级
          * 输出：{ subject, qtype, diff(1-10), kps:[], errorCause, timeSensitive }
          * ================================================================ */
-        function aiAnalyzeQuestion(text, cb, imgDataUrl, textIsQuestion) {
+        /* ================================================================
+         * 多图分批识别（仅 3 张及以上启用）
+         * 一次把 5 张图塞进同一个视觉请求，请求体积大、上游容易迟迟不返回
+         * （实测浏览器端 5 图 150s 仍无结果，2 图 15s 正常）。
+         * 这里改为每批 2 张并行提取材料，合并成完整原文后再走原有分析逻辑；
+         * 1-2 张完全不经过这里，原有分析路径与效果保持不变。
+         * ================================================================ */
+        function wqExtractBatch(batchImgs, cb) {
+            var sys = "你是资料整理助手。请完整提取这些图片中的全部文字内容（按图片顺序逐段保留，不要概括、不要遗漏、不要声称未提供材料）；" +
+                "若图片中有重要画面信息（漫画/照片/图表/几何图/实验装置等），另起一段以「【画面】」开头描述关键视觉细节。" +
+                "严格按JSON返回，不要其他文字：{\"text\":\"提取到的完整内容\",\"visualMode\":\"text/visual/mixed\",\"scene\":\"一句话点明画面主体及其出处或性质，无法识别写未知\",\"searchQuery\":\"2-8个中文检索词，无需外部资料填空字符串\"}" +
+                "visualMode 规则：text=价值几乎全在文字；visual=几乎没有文字、关键信息全在画面；mixed=文字与画面缺一不可。";
+            var content = [{ type: "text", text: "请提取这 " + batchImgs.length + " 张图片的全部内容。" }];
+            batchImgs.forEach(function (u) { content.push({ type: "image_url", image_url: { url: u } }); });
+            WQ_AI_ROUTER.call([
+                { role: "system", content: sys },
+                { role: "user", content: content }
+            ], "vision", function (err, res) {
+                if (err || !res || !res.text) { cb(null); return; }
+                var j = null;
+                try {
+                    var m = res.text.match(/\{[\s\S]*\}/);
+                    if (m) j = JSON.parse(m[0]);
+                } catch (e) { j = null; }
+                if (!j || typeof j.text !== "string" || !j.text.trim()) { cb(null); return; }
+                cb(j);
+            }, { timeout: 45000 });
+        }
+
+        function wqAnalyzeByBatches(imgList, text, textIsQuestion, cb) {
+            var batches = [], i;
+            for (i = 0; i < imgList.length; i += 2) batches.push(imgList.slice(i, i + 2));
+            var parts = new Array(batches.length), pending = batches.length;
+            function settle() {
+                if (pending > 0) return;
+                var okCount = 0;
+                var merged = [], rank = { text: 0, mixed: 1, visual: 2 }, vm = "text", scene = "", sq = "";
+                parts.forEach(function (p) {
+                    if (!p) return;
+                    okCount++;
+                    var t = String(p.text || "").trim();
+                    if (t) merged.push(t);
+                    var v = (p.visualMode === "visual" || p.visualMode === "mixed") ? p.visualMode : "text";
+                    if (rank[v] > rank[vm]) vm = v;
+                    if (!scene && p.scene && p.scene !== "未知") scene = String(p.scene).trim();
+                    if (!sq && p.searchQuery) sq = String(p.searchQuery).trim();
+                });
+                var mergedText = merged.join("\n\n");
+                if (!okCount || !mergedText) { cb(new Error("vision_failed"), null); return; }
+                /* 用户手写的补充指令随材料一起交给分析（不是题目材料，不能污染原文） */
+                var inputText = mergedText;
+                if (text && String(text).trim() && !textIsQuestion) {
+                    inputText = "【补充指令（不是题目材料）】" + String(text).trim() + "\n\n【题目材料】\n" + mergedText;
+                }
+                /* 合并后的完整材料交给原有的纯文本分析流程，格式与判断标准完全沿用原逻辑 */
+                aiAnalyzeQuestion(inputText, function (err, result) {
+                    if (err || !result) {
+                        /* 分析失败也不丢材料：交给规则兜底按原文重新判定学科/知识点 */
+                        cb(null, {
+                            text: mergedText, subject: "", qtype: "", kps: [], diff: 5,
+                            errorCause: "method", timeSensitive: isTimeSensitive(mergedText),
+                            visualMode: vm, scene: scene, searchQuery: sq
+                        });
+                        return;
+                    }
+                    if (Array.isArray(result.questions) && result.questions.length) {
+                        result.questions.forEach(function (q) {
+                            if (vm !== "text") q.visualMode = vm;
+                            if (scene && (!q.scene || q.scene === "未知")) q.scene = scene;
+                            if (sq && !q.searchQuery) q.searchQuery = sq;
+                        });
+                    } else {
+                        result.visualMode = vm;
+                        if (!result.scene) result.scene = scene;
+                        if (!result.searchQuery) result.searchQuery = sq;
+                    }
+                    if (!result.text) result.text = mergedText;
+                    /* 有补充指令时，模型回显的原文可能混入指令，统一以合并材料为准 */
+                    if (!textIsQuestion) result.text = mergedText;
+                    cb(null, result);
+                }, null, true, 45000);
+            }
+            batches.forEach(function (b, k) {
+                wqExtractBatch(b, function (j) {
+                    parts[k] = j;
+                    pending--;
+                    settle();
+                });
+            });
+        }
+
+        function aiAnalyzeQuestion(text, cb, imgDataUrl, textIsQuestion, textTimeoutMs) {
             if (!WQ_AI_CONFIG.enabled) { cb(new Error("ai_disabled"), null); return; }
             var sysPrompt = "你是一位经验丰富的教研组长。请分析题目，严格按JSON返回（不要其他文字）：" +
                 '{"subject":"学科(数学/物理/化学/生物/语文/英语/政治/历史/地理/体育/其他)","qtype":"题型(选择题/填空题/解答题/证明题/计算题/简答题/作文/阅读理解/其他)","diff":1-10,"kps":["知识点1","知识点2"],"errorCause":"最可能的错因(careless粗心/concept概念不清/method方法未掌握/comprehensive综合能力不足/review审题失误)","timeSensitive":true/false,"visualMode":"text/visual/mixed","searchQuery":"","scene":""}' +
@@ -7728,6 +7819,8 @@ var IndoorRouter = (function () {
                 "③ 拿不准时，一律按单题处理。拆分时返回 {\"questions\":[{\"text\":\"第一题完整题干\",\"subject\":...,\"qtype\":...,\"diff\":...,\"kps\":[...],\"errorCause\":...,\"visualMode\":\"text/visual/mixed\",\"searchQuery\":\"\",\"scene\":\"\"},...]}，每道题独立分析（visualMode、scene、searchQuery 按该题所依赖的图片区域单独判断）。若只有一道题，按原格式返回。";
             var userContent;
             var imgList = imgDataUrl ? (Array.isArray(imgDataUrl) ? imgDataUrl : [imgDataUrl]) : [];
+            /* 3 张及以上：分批识别后合并材料，再走原有分析（多图单请求体积过大，上游经常不返回） */
+            if (imgList.length >= 3) { wqAnalyzeByBatches(imgList, text, textIsQuestion, cb); return; }
             if (imgList.length) {
                 /* 多模态：图片为主 */
                 var suppText = (text || "").trim();
@@ -7758,7 +7851,7 @@ var IndoorRouter = (function () {
              * 超时后由路由换下一个视觉模型（hy4 → kimi-k3），绝不降级到文本模型 */
             var _doCall = imgList.length
                 ? function (handler) { WQ_AI_ROUTER.call(messages, "vision", handler, { timeout: 45000 }); }
-                : function (handler) { WQ_AI_ROUTER.call(messages, "analyze", handler, { timeout: 12000 }); };
+                : function (handler) { WQ_AI_ROUTER.call(messages, "analyze", handler, { timeout: textTimeoutMs || 12000 }); };
             _doCall(function (err, res) {
                 if (err) { cb(err, null); return; }
                 var result = null;
@@ -10245,9 +10338,9 @@ var IndoorRouter = (function () {
 
             /* === 学科/知识点/难度 全部由 AI 判断 === */
             /* 纯文本 12s 内必出结果（竞速 + 规则兜底）；
-             * 含图片必须放宽：两个视觉模型串行最多 90s，界面兜底要留出余量，
-             * 否则 AI 结果晚到会被丢弃，只剩下「没有图片」式的错误分析 */
-            var _analyzeTimeoutMs = _wqImgs.length ? 100000 : 12000;
+             * 1-2 张图：两个视觉模型串行最多 90s，界面兜底留余量到 100s；
+             * 3 张及以上走分批识别（每批并行提取 + 合并分析），耗时更长，兜底放宽到 150s */
+            var _analyzeTimeoutMs = _wqImgs.length >= 3 ? 150000 : (_wqImgs.length ? 100000 : 12000);
             var aiTimeout = setTimeout(function () {
                 if (!_wqIsCurrentRun(_myRun)) return;
                 console.warn("[WQ] AI 分析超时，切换规则兜底");
@@ -10308,7 +10401,9 @@ var IndoorRouter = (function () {
 
             function doAnalyze(visionImgs) {
                 _visionImgs = visionImgs || [];
-                _wqVisionImgs = _visionImgs;  /* 留存到模块级：visual/mixed 模式讲解阶段直接带图 */
+                /* 留存到模块级：visual/mixed 模式讲解阶段直接带图。
+                 * 多图时只留前 2 张：讲解/追问再塞 5 张会让请求体积过大，同样容易卡住 */
+                _wqVisionImgs = _visionImgs.length > 2 ? _visionImgs.slice(0, 2) : _visionImgs;
                 _wqVisualMode = "text";       /* 新一轮分析先复位，等 AI 结果再按 visualMode 切换 */
                 _wqSearchQuery = "";          /* 复位：等 AI 判断是否需要补充背景知识 */
                 _wqScene = "";
