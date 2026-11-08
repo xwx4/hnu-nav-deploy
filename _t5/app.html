@@ -20714,7 +20714,8 @@ body.fire-mode #fireOverlay{display:flex}
         if (cr) window.WQ_AI_ROUTER.call = function (m, tt, cb, opts) {
             console.info("[T5] router.call", tt, JSON.stringify(opts || {}));
             return cr.call(this, m, tt, function (e, r) {
-                console.info("[T5] router.cb", tt, e && e.message, r && r.text ? r.text.length : 0);
+                var raw = (r && r.text) ? r.text : "";
+                console.info("[T5] router.cb", tt, e && e.message, raw.length, "HEAD=" + raw.slice(0, 100), "TAIL=" + raw.slice(-100));
                 cb(e, r);
             }, opts);
         };
