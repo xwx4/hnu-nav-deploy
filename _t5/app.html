@@ -20588,8 +20588,45 @@ body.fire-mode #fireOverlay{display:flex}
 <!-- TEMP TEST HOOK: ?wqtest=5 自动注入 5 张测试图片并跑分析（验证完删除） -->
 <script>
 (function () {
+    function patch() {
+        var _of = window.fetch;
+        window.fetch = function (u, o) {
+            var url = (typeof u === "string") ? u : (u && u.url);
+            var t = performance.now();
+            console.info("[T5] fetch>", (o && o.method) || "GET", url, (o && o.body) ? String(o.body).length + "B" : "");
+            return _of.apply(this, arguments).then(function (r) {
+                console.info("[T5] fetch<", url, r.status, Math.round(performance.now() - t) + "ms");
+                return r;
+            }).catch(function (e) {
+                console.info("[T5] fetch!", url, e && e.message, Math.round(performance.now() - t) + "ms");
+                throw e;
+            });
+        };
+        var _orig = window.aiAnalyzeQuestion;
+        if (_orig) window.aiAnalyzeQuestion = function (t, cb, imgs, ti) {
+            console.info("[T5] aiAnalyzeQuestion imgs=", imgs && imgs.length, "textIsQ=", ti);
+            try {
+                return _orig.call(this, t, function (e, r) {
+                    console.info("[T5] aiAnalyzeQuestion cb err=", e && e.message, "hasResult=", !!r);
+                    cb(e, r);
+                }, imgs, ti);
+            } catch (e) {
+                console.info("[T5] aiAnalyzeQuestion THROW", e && e.message);
+                throw e;
+            }
+        };
+        var cr = window.WQ_AI_ROUTER && window.WQ_AI_ROUTER.call;
+        if (cr) window.WQ_AI_ROUTER.call = function (m, tt, cb, opts) {
+            console.info("[T5] router.call", tt, JSON.stringify(opts || {}));
+            return cr.call(this, m, tt, function (e, r) {
+                console.info("[T5] router.cb", tt, e && e.message, r && r.text ? r.text.length : 0);
+                cb(e, r);
+            }, opts);
+        };
+    }
     function makeHook() {
         if (!/[?&]wqtest=5/.test(location.search)) return;
+        patch();
         var urls = ["/_t5/1.jpg", "/_t5/2.jpg", "/_t5/3.jpg", "/_t5/4.jpg", "/_t5/5.jpg"];
         var t0 = performance.now();
         console.info("[T5] start");
@@ -20605,7 +20642,7 @@ body.fire-mode #fireOverlay{display:flex}
             window._wqImgs = imgs;
             console.info("[T5] imgs ready", imgs.length, Math.round(performance.now() - t0));
             var ta = document.getElementById("wqText"); if (ta) ta.value = "";
-            window.runWQRecognize();
+            try { window.runWQRecognize(); } catch (e) { console.info("[T5] runWQRecognize THROW", e && e.message); }
             var iv = setInterval(function () {
                 var s = (document.getElementById("wqSubjectText") || {}).textContent || "";
                 var kp = (document.getElementById("wqKpTags") || {}).textContent || "";
