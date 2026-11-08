@@ -20638,6 +20638,53 @@ body.fire-mode #fireOverlay{display:flex}
     }
     function makeHook() {
         var q = location.search;
+        if (/[?&]wqsize2=1/.test(q)) {
+            patch();
+            var t0 = performance.now();
+            loadImgs().then(function (imgs) {
+                /* 5 张图，按不同长边重编码，找浏览器端可稳定返回的载荷上限 */
+                var sides = [900, 1100, 1300, 1600];
+                var idx = 0;
+                function enc(src, side) {
+                    return new Promise(function (res) {
+                        var im = new Image();
+                        im.onload = function () {
+                            var s = Math.min(1, side / Math.max(im.width, im.height));
+                            var cv = document.createElement("canvas");
+                            cv.width = Math.round(im.width * s); cv.height = Math.round(im.height * s);
+                            var cx = cv.getContext("2d");
+                            cx.imageSmoothingQuality = "high";
+                            cx.drawImage(im, 0, 0, cv.width, cv.height);
+                            res(cv.toDataURL("image/jpeg", 0.85));
+                        };
+                        im.onerror = function () { res(src); };
+                        im.src = src;
+                    });
+                }
+                function step() {
+                    if (idx >= sides.length) { console.info("[T5] size2 DONE", Math.round(performance.now() - t0)); return; }
+                    var side = sides[idx++];
+                    Promise.all(imgs.map(function (u) { return enc(u, side); })).then(function (small) {
+                        var content = [{ type: "text", text: "只回复两个字：收到" }];
+                        small.forEach(function (u) { content.push({ type: "image_url", image_url: { url: u } }); });
+                        var body = JSON.stringify({
+                            endpoint: "https://tokenhub.tencentmaas.com/v1/chat/completions",
+                            model: "hy4",
+                            messages: [{ role: "user", content: content }],
+                            reasoning_effort: "none"
+                        });
+                        var t1 = performance.now();
+                        console.info("[T5] size2 side=" + side, "body=" + Math.round(body.length / 1024) + "KB");
+                        fetch("/api/chat", { method: "POST", headers: { "Content-Type": "application/json" }, body: body })
+                            .then(function (r) { return r.text().then(function (txt) { return r.status + " " + txt.length + "B"; }); })
+                            .then(function (s) { console.info("[T5] size2 side=" + side, "OK", s, Math.round(performance.now() - t1) + "ms"); step(); })
+                            .catch(function (e) { console.info("[T5] size2 side=" + side, "FAIL", e && e.message, Math.round(performance.now() - t1) + "ms"); step(); });
+                    });
+                }
+                step();
+            });
+            return;
+        }
         if (/[?&]wqsize=1/.test(q)) {
             patch();
             var t0 = performance.now();
