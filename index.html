@@ -7740,9 +7740,10 @@ var IndoorRouter = (function () {
                 var mergedText = merged.join("\n\n");
                 if (!okCount || !mergedText) { cb(new Error("vision_failed"), null); return; }
                 /* 用户手写的补充指令随材料一起交给分析（不是题目材料，不能污染原文） */
-                var inputText = mergedText;
+                var inputText = "【输出精简要求（重要）】本题材料已由系统另存，正文无需复述：单题时 text 字段直接填「（材料已由系统保存）」；" +
+                    "若材料包含多道独立题目，才输出 questions 数组，且每题的 text 必须填写该题自身的完整原文。其余字段照常分析。\n\n【题目材料】\n" + mergedText;
                 if (text && String(text).trim() && !textIsQuestion) {
-                    inputText = "【补充指令（不是题目材料）】" + String(text).trim() + "\n\n【题目材料】\n" + mergedText;
+                    inputText = "【补充指令（不是题目材料）】" + String(text).trim() + "\n\n" + inputText;
                 }
                 /* 合并后的完整材料交给原有的纯文本分析流程，格式与判断标准完全沿用原逻辑 */
                 aiAnalyzeQuestion(inputText, function (err, result) {
@@ -7760,17 +7761,18 @@ var IndoorRouter = (function () {
                             if (vm !== "text") q.visualMode = vm;
                             if (scene && (!q.scene || q.scene === "未知")) q.scene = scene;
                             if (sq && !q.searchQuery) q.searchQuery = sq;
+                            /* 占位符兜底：多题时若某题没回填原文，用合并材料顶上 */
+                            if (!q.text || q.text.indexOf("材料已由系统保存") >= 0) q.text = mergedText;
                         });
                     } else {
                         result.visualMode = vm;
                         if (!result.scene) result.scene = scene;
                         if (!result.searchQuery) result.searchQuery = sq;
                     }
-                    if (!result.text) result.text = mergedText;
-                    /* 有补充指令时，模型回显的原文可能混入指令，统一以合并材料为准 */
-                    if (!textIsQuestion) result.text = mergedText;
+                    /* 单题时不依赖模型复述，原文以合并材料为准 */
+                    if (!Array.isArray(result.questions) || !result.questions.length) result.text = mergedText;
                     cb(null, result);
-                }, null, true, 45000);
+                }, null, true, 60000);
             }
             batches.forEach(function (b, k) {
                 wqExtractBatch(b, function (j) {
