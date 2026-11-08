@@ -20712,13 +20712,15 @@ body.fire-mode #fireOverlay{display:flex}
             });
             return;
         }
-        if (!/[?&]wqtest=5/.test(q)) return;
+        var m = q.match(/[?&]wqtest=(\d)/);
+        if (!m) return;
+        var want = parseInt(m[1], 10);
         patch();
         var t0 = performance.now();
-        console.info("[T5] start");
+        console.info("[T5] start n=" + want);
         loadImgs().then(function (imgs) {
-            window._wqImgs = imgs;
-            console.info("[T5] imgs ready", imgs.length, Math.round(performance.now() - t0));
+            window._wqImgs = imgs.slice(0, want);
+            console.info("[T5] imgs ready", window._wqImgs.length, Math.round(performance.now() - t0));
             var ta = document.getElementById("wqText"); if (ta) ta.value = "";
             try { window.runWQRecognize(); } catch (e) { console.info("[T5] runWQRecognize THROW", e && e.message); }
             var iv = setInterval(function () {
